@@ -9,6 +9,9 @@ jobs:
   run-scrapers:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout repository
@@ -34,7 +37,27 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           scraperapikey: ${{ secrets.SCRAPER_API_KEY }}
           Geminiapikey: ${{ secrets.GEMINI_API_KEY }}
-        run: python runner.py
+        run: |
+          attempt=1
+          max_attempts=2
+
+          while [ "$attempt" -le "$max_attempts" ]; do
+            echo "Starting scraper run (attempt $attempt/$max_attempts)"
+            if python runner.py; then
+              echo "Scraper run succeeded on attempt $attempt"
+              break
+            fi
+
+            if [ "$attempt" -lt "$max_attempts" ]; then
+              echo "Scraper run failed on attempt $attempt. Retrying after 30 seconds..."
+              sleep 30
+            else
+              echo "Scraper run failed after $max_attempts attempts."
+              exit 1
+            fi
+
+            attempt=$((attempt + 1))
+          done
 
       - name: Upload scraper artifacts
         if: always()
