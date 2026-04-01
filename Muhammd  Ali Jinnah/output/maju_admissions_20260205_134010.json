@@ -1,0 +1,26 @@
+[
+  {
+    "university": "Muhammad Ali Jinnah University",
+    "program_title": "Spring 2026 Undergraduate Admissions",
+    "publish_date": "Saturday, February 7, 2026",
+    "last_date": "Saturday, February 14, 2026",
+    "details_link": "https://jinnah.edu/key-admission-dates/",
+    "ai_analysis": {
+      "university": "MAJU Karachi",
+      "programs_offered": [
+        "BBA",
+        "BS FinTech",
+        "BS Psychology",
+        "BS Software Engineering",
+        "BS Biotechnology",
+        "BS Business Analytics",
+        "BS Accounting and Finance",
+        "BS Business Computing",
+        "BS Computer Science",
+        "BS Artificial Intelligence",
+        "BS Cyber Security"
+      ],
+      "ai_comments": "Perfect"
+    }
+  }
+]

@@ -1,0 +1,23 @@
+[
+  {
+    "university": "FAST University",
+    "program_title": "Undergraduate Admissions",
+    "publish_date": "Monday, May 19, 2025",
+    "last_date": "Friday, July 04, 2025",
+    "details_link": "https://nu.edu.pk/admissions/schedule",
+    "programs_offered": [
+      "Bachelor of Business Administration",
+      "Bachelor of Science (Accounting and Finance)",
+      "Bachelor of Science (Artificial Intelligence)",
+      "Bachelor of Science (Business Analytics)",
+      "Bachelor of Science (Civil Engineering)",
+      "Bachelor of Science (Computer Engineering)",
+      "Bachelor of Science (Computer Science)",
+      "Bachelor of Science (Cyber Security)",
+      "Bachelor of Science (Data Science)",
+      "Bachelor of Science (Electrical Engineering)",
+      "Bachelor of Science (Financial Technology)",
+      "Bachelor of Science (Software Engineering)"
+    ]
+  }
+]

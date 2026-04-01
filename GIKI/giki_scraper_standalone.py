@@ -10,9 +10,14 @@ import logging
 import os
 import sys
 import time
+import glob
 import urllib3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
+
+# Add parent directory to path to import db module
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from db.insert_admissioin import insert_admission, normalize_admission_record
 
 # Disable SSL warnings only if needed
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -92,8 +97,11 @@ def fetch_page(url: str, description: str = "") -> Optional[BeautifulSoup]:
     for attempt in range(1, Config.MAX_RETRIES + 1):
         try:
             logger.info(f"Fetching {description or url} (attempt {attempt}/{Config.MAX_RETRIES})")
-            
-            response = requests.get(
+
+            # Avoid unstable inherited proxy settings for direct university site access.
+            session = requests.Session()
+            session.trust_env = False
+            response = session.get(
                 url,
                 timeout=Config.REQUEST_TIMEOUT,
                 verify=Config.VERIFY_SSL,
@@ -119,6 +127,25 @@ def fetch_page(url: str, description: str = "") -> Optional[BeautifulSoup]:
             time.sleep(Config.RETRY_DELAY)
     
     logger.error(f"Failed to fetch after {Config.MAX_RETRIES} attempts")
+    return None
+
+
+def load_latest_backup_data() -> Optional[Dict]:
+    """Load the latest saved output file for fallback when live scraping fails."""
+    pattern = os.path.join(Config.BASE_OUTPUT_DIR, "giki", "giki_admissions_*.json")
+    files = [f for f in glob.glob(pattern) if not f.endswith("giki_admissions_latest.json")]
+    if not files:
+        return None
+
+    latest = max(files, key=os.path.getmtime)
+    try:
+        with open(latest, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if isinstance(payload, list) and payload:
+            logger.warning(f"Using fallback data from latest backup: {latest}")
+            return payload[0]
+    except Exception as e:
+        logger.warning(f"Failed to load fallback backup file: {e}")
     return None
 
 # =============================================================================
@@ -237,12 +264,15 @@ def format_date(date_str: str) -> str:
     if not date_str:
         return None
     
-    try:
-        date_obj = datetime.strptime(date_str, "%B %d, %Y")
-        return date_obj.strftime("%Y-%m-%d")
-    except ValueError:
-        logger.warning(f"Could not parse date: {date_str}")
-        return date_str
+    for fmt in ("%B %d, %Y", "%d-%b-%Y"):
+        try:
+            date_obj = datetime.strptime(date_str, fmt)
+            return date_obj.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+
+    logger.warning(f"Could not parse date: {date_str}")
+    return date_str
 
 def build_output_json(programs: List[str], dates: Dict[str, str]) -> Dict:
     """
@@ -261,18 +291,54 @@ def build_output_json(programs: List[str], dates: Dict[str, str]) -> Dict:
         "publish_date": format_date(dates.get('application_start')),
         "last_date": format_date(dates.get('application_deadline')),
         "details_link": Config.ADMISSIONS_URL,
-        "advertisement_link": Config.PROGRAMS_URL,
-        "programs": programs,
-        "scraped_at": datetime.utcnow().isoformat() + "Z"
+        "programs_offered": programs
     }
+
+# =============================================================================
+# DATA VALIDATION
+# =============================================================================
+
+def validate_scraped_data(data):
+    """Validate scraped data quality"""
+    issues = []
+    
+    if not data.get("last_date"):
+        issues.append("Missing application deadline")
+    
+    if not data.get("programs_offered"):
+        issues.append("No programs found")
+    
+    if issues:
+        logger.warning(f"Data validation issues: {', '.join(issues)}")
+    else:
+        logger.info("✓ Data validation passed")
+    
+    return len(issues) == 0, issues
 
 # =============================================================================
 # FILE OPERATIONS
 # =============================================================================
 
+def insert_to_database(data):
+    """Insert data into PostgreSQL database"""
+    try:
+        # Data should be a list with a single record
+        if isinstance(data, list) and len(data) > 0:
+            record = data[0]
+            logger.info("Inserting data into database...")
+            insert_admission(record)
+            logger.info("✓ Data successfully inserted into database")
+            return True
+        else:
+            logger.error("Invalid data format for database insertion")
+            return False
+    except Exception as e:
+        logger.error(f"Failed to insert data into database: {e}")
+        return False
+
 def save_to_json(data: Dict) -> str:
     """
-    Save data to timestamped JSON file in organized structure
+    Save data to timestamped JSON file (backup only)
     
     Args:
         data: Data dict to save
@@ -301,11 +367,11 @@ def save_to_json(data: Dict) -> str:
         with open(latest_filepath, 'w', encoding='utf-8') as f:
             json.dump([data], f, indent=2, ensure_ascii=False)
         
-        logger.info(f"✓ Data saved to {filepath}")
+        logger.info(f"✓ Backup data saved to {filepath}")
         return filepath
         
     except IOError as e:
-        logger.error(f"Failed to save JSON: {e}")
+        logger.error(f"Failed to save backup JSON: {e}")
         raise
 
 # =============================================================================
@@ -328,12 +394,12 @@ def create_summary(success: bool, message: str, data: Optional[Dict] = None) -> 
         "success": success,
         "university": Config.UNIVERSITY_NAME,
         "message": message,
-        "timestamp": datetime.utcnow().isoformat() + "Z"
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     }
     
     if data:
         summary["data"] = data
-        summary["programs_count"] = len(data.get("programs", []))
+        summary["programs_count"] = len(data.get("programs_offered", []))
     
     return summary
 
@@ -354,17 +420,33 @@ def main():
         # Step 2: Scrape admission dates
         dates = scrape_admission_dates()
         if not dates or not dates.get('application_start') or not dates.get('application_deadline'):
-            summary = create_summary(False, "Failed to extract admission dates")
-            logger.error(json.dumps(summary, indent=2))
-            return summary
-        
+            fallback = load_latest_backup_data()
+            if fallback and fallback.get("publish_date") and fallback.get("last_date"):
+                dates = {
+                    "application_start": fallback.get("publish_date"),
+                    "application_deadline": fallback.get("last_date"),
+                }
+                logger.warning("Admission dates fetch failed; using dates from latest local backup")
+            else:
+                summary = create_summary(False, "Failed to extract admission dates")
+                logger.error(json.dumps(summary, indent=2))
+                return summary
+
         # Step 3: Build output JSON
-        output_data = build_output_json(programs, dates)
+        output_data = normalize_admission_record(build_output_json(programs, dates))
         
-        # Step 4: Save to file
+        # Step 4: Validate data
+        is_valid, issues = validate_scraped_data(output_data)
+        if not is_valid:
+            logger.warning(f"Data quality issues detected: {issues}")
+        
+        # Step 5: Save backup to file (always)
         filepath = save_to_json(output_data)
+
+        # Step 6: Insert into database (non-fatal if unreachable)
+        insert_to_database([output_data])
         
-        # Step 5: Display output
+        # Step 7: Display output
         logger.info("="*60)
         logger.info("OUTPUT:")
         logger.info("="*60)

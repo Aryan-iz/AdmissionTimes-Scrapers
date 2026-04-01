@@ -1,0 +1,36 @@
+[
+  {
+    "university": "IBA Sukkur",
+    "program_title": "Admissions 2025 Undergraduate Programs (Main Campus and Sub-Campuses) Phase II",
+    "publish_date": "2025-06-14",
+    "last_date": "2025-07-03",
+    "details_link": "https://www.iba-suk.edu.pk/admissions/details/3107",
+    "scraped_at": "2026-03-13T09:33:39.599002+00:00",
+    "advertisement_link": "https://apps.iba-suk.edu.pk/dashboard-admission-sts-hr/down/admission_documents/20250616062349406.pdf",
+    "ai_analysis": {
+      "university": "Sukkur IBA University",
+      "programs_offered": [
+        "BBA",
+        "BS",
+        "Accounting & Finance",
+        "Media & Communication",
+        "Physical Education & Sports Sciences",
+        "BE",
+        "Computer Systems Engineering",
+        "BS",
+        "Computer Science",
+        "Software Engineering",
+        "Computer Science Specialization in Artificial Intelligence (AI)",
+        "Electrical Engineering",
+        "BE Specialization in Power",
+        "BE Specialization in Electronics",
+        "BE Specialization in Telecommunication",
+        "BS",
+        "Mathematics",
+        "BS Specialization in Data Science",
+        "BS Specialization in Acturial & Risk Management",
+        "BS Artificial Intelligence (AI)"
+      ]
+    }
+  }
+]

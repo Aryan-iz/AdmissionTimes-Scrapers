@@ -5,6 +5,7 @@ Matches MAJU scraper structure with comprehensive logging and standardized outpu
 """
 
 import os
+import sys
 import re
 import json
 import time
@@ -24,6 +25,10 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.service import Service
 
+# Add parent directory to path to import db module
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from db.insert_admissioin import insert_admission, normalize_admission_record
+
 # ==============================
 # CONFIGURATION
 # ==============================
@@ -34,7 +39,7 @@ class Config:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     LOGS_DIR = os.path.join(BASE_DIR, "logs")
     OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-    ENV_FILE = os.path.join(BASE_DIR, ".env")
+    ENV_FILE = os.path.abspath(os.path.join(BASE_DIR, "..", ".env"))
     
     # University Information
     UNIVERSITY_NAME = "National University of Technology (NUTECH), Islamabad"
@@ -200,19 +205,13 @@ def detect_current_semester():
     year = now.year
     month = now.month
     
-    # Spring semester: January - June (admissions typically in Dec-Feb)
-    # Fall semester: July - December (admissions typically in Jun-Aug)
-    
-    if month >= 1 and month <= 6:
+    # Spring semester: January - June
+    # Fall semester: July - December
+    # Use the current calendar year directly.
+    if 1 <= month <= 6:
         semester = "Spring"
-        # If we're in Jan-Feb, it's for current year, otherwise next year
-        if month <= 2:
-            year = year
-        else:
-            year = year + 1
     else:
         semester = "Fall"
-        year = year
     
     return f"{semester} {year}"
 
@@ -430,7 +429,7 @@ def extract_admission_schedule(soup: BeautifulSoup) -> List[Dict]:
                         "center": center
                     }
                     schedule_data.append(entry)
-                    logger.info(f"✓ Added {batch_info} (within opportunity window)")
+                    logger.info(f"[OK] Added {batch_info} (within opportunity window)")
                 else:
                     logger.debug(f"✗ Skipped {batch_info} (outside opportunity window)")
             
@@ -483,20 +482,33 @@ def scrape_nutech_data(driver):
         
         # Extract dates
         full_text = soup.get_text(separator=" ", strip=True)
-        
-        # Extract upload/publish date
+
+        # Determine publish date from the admission schedule first.
+        # For this scraper, publish_date should represent opening/registration start.
         upload_date = None
-        upload_match = re.search(r"(Updated|Published|Posted)\s*on[:\-]?\s*(\d{1,2}\s+[A-Za-z]{3,9}\s*\d{2,4})", full_text, re.I)
-        if upload_match:
-            try:
-                d = datetime.strptime(upload_match.group(2), "%d %b %Y")
-                upload_date = d.strftime("%Y-%m-%d")
-            except Exception:
-                upload_date = upload_match.group(2)
-        else:
-            dates_in_text = extract_dates_from_text(full_text)
-            if dates_in_text:
-                upload_date = min(dates_in_text).strftime("%Y-%m-%d")
+        if admission_schedule:
+            start_dates = []
+            for entry in admission_schedule:
+                try:
+                    start_dates.append(datetime.strptime(entry["registration_start"], "%Y-%m-%d"))
+                except Exception:
+                    continue
+            if start_dates:
+                upload_date = min(start_dates).strftime("%Y-%m-%d")
+
+        # Fallback to page-level published/updated date only when schedule dates are unavailable.
+        if not upload_date:
+            upload_match = re.search(r"(Updated|Published|Posted)\s*on[:\-]?\s*(\d{1,2}\s+[A-Za-z]{3,9}\s*\d{2,4})", full_text, re.I)
+            if upload_match:
+                raw_date = upload_match.group(2).strip()
+                parsed = None
+                for fmt in ("%d %b %Y", "%d %B %Y", "%d %b %y", "%d %B %y"):
+                    try:
+                        parsed = datetime.strptime(raw_date, fmt)
+                        break
+                    except Exception:
+                        continue
+                upload_date = parsed.strftime("%Y-%m-%d") if parsed else raw_date
         
         # Extract last date from opportunity window
         last_date = None
@@ -625,7 +637,7 @@ def validate_scraped_data(data):
     if not data.get("last_date"):
         issues.append("Missing application deadline")
     
-    if not data.get("ai_analysis", {}).get("programs_offered"):
+    if not data.get("programs_offered"):
         issues.append("No programs found")
     
     if issues:
@@ -638,8 +650,25 @@ def validate_scraped_data(data):
 # ==============================
 # DATA PERSISTENCE
 # ==============================
+def insert_to_database(data):
+    """Insert data into PostgreSQL database"""
+    try:
+        # Data should be a list with a single record
+        if isinstance(data, list) and len(data) > 0:
+            record = data[0]
+            logger.info("Inserting data into database...")
+            insert_admission(record)
+            logger.info("[OK] Data successfully inserted into database")
+            return True
+        else:
+            logger.error("Invalid data format for database insertion")
+            return False
+    except Exception as e:
+        logger.error(f"Failed to insert data into database: {e}")
+        raise
+
 def save_to_json(data, filename=None):
-    """Save data to JSON file with atomic write"""
+    """Save data to JSON file with atomic write (backup only)"""
     if filename is None:
         filename = Config.get_output_filename()
     
@@ -654,11 +683,11 @@ def save_to_json(data, filename=None):
             os.remove(filename)
         os.rename(temp_filename, filename)
         
-        logger.info(f"[OK] Data saved to {filename}")
+        logger.info(f"[OK] Backup data saved to {filename}")
         return filename
         
     except Exception as e:
-        logger.error(f"Failed to save data: {e}")
+        logger.error(f"Failed to save backup data: {e}")
         raise
 
 # ==============================
@@ -687,34 +716,29 @@ def run_scraper():
         semester = detect_current_semester()
         logger.info(f"Detected semester: {semester}")
         
-        # Structure raw data
+        # Structure raw data with flattened format
         raw_data = [{
             "university": Config.UNIVERSITY_NAME,
             "program_title": f"{semester} Undergraduate Admissions",
             "publish_date": scraped_data.get("publish_date"),
             "last_date": scraped_data.get("last_date"),
             "details_link": Config.ADMISSIONS_URL,
-            "ai_analysis": {
-                "university": Config.UNIVERSITY_SHORT_NAME,
-                "programs_offered": scraped_data.get("programs", [])
-            }
+            "programs_offered": scraped_data.get("programs", [])
         }]
+        raw_data = [normalize_admission_record(raw_data[0])]
         
         # Validate data
         is_valid, issues = validate_scraped_data(raw_data[0])
         if not is_valid:
             logger.warning(f"Data quality issues detected: {issues}")
         
-        # AI Analysis (optional - continues even if it fails)
-        try:
-            final_data = analyze_with_ai(raw_data)
-        except AIAnalysisError as e:
-            logger.warning(f"AI analysis failed, using raw data: {e}")
-            # Add default ai_comments if AI fails
-            raw_data[0]["ai_analysis"]["ai_comments"] = "Data extracted successfully"
-            final_data = raw_data
+        # Use raw data as final data (no AI processing needed for simple format)
+        final_data = raw_data
         
-        # Save to file
+        # Insert into database
+        insert_to_database(final_data)
+        
+        # Also save backup to file
         output_file = save_to_json(final_data)
         
         # Print summary
@@ -722,7 +746,7 @@ def run_scraper():
         logger.info("="*60)
         logger.info("SCRAPING COMPLETED SUCCESSFULLY")
         logger.info(f"Execution time: {execution_time:.2f} seconds")
-        logger.info(f"Output file: {output_file}")
+        logger.info(f"Backup file: {output_file}")
         logger.info(f"Programs found: {len(scraped_data.get('programs', []))}")
         logger.info(f"Last date: {scraped_data.get('last_date', 'N/A')}")
         logger.info("="*60)

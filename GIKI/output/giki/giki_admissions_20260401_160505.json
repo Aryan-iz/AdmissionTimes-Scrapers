@@ -5,8 +5,7 @@
     "publish_date": "15-Mar-2026",
     "last_date": "15-May-2026",
     "details_link": "https://giki.edu.pk/admissions/admissions-undergraduates/",
-    "advertisement_link": "https://giki.edu.pk/programs/",
-    "programs": [
+    "programs_offered": [
       "Artificial Intelligence",
       "Computer Engineering",
       "Computer Science",
