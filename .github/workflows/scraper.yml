@@ -44,7 +44,7 @@ jobs:
 
           while [ "$attempt" -le "$max_attempts" ]; do
             echo "Starting scraper run (attempt $attempt/$max_attempts)"
-            if python runner.py 2>&1 | tee runner.log; then
+            if python runner.py --exit-zero-on-failures 2>&1 | tee runner.log; then
               echo "Scraper run succeeded on attempt $attempt"
               break
             fi

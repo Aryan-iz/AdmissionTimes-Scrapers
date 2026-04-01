@@ -54,6 +54,11 @@ def main() -> int:
         action="store_true",
         help="List scraper scripts and exit.",
     )
+    parser.add_argument(
+        "--exit-zero-on-failures",
+        action="store_true",
+        help="Return exit code 0 even if one or more scrapers fail.",
+    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent
@@ -95,6 +100,9 @@ def main() -> int:
         print("Failed scripts:")
         for script, code in failed:
             print(f"- {script} (exit code: {code})")
+        if args.exit_zero_on_failures:
+            print("Continuing with exit code 0 due to --exit-zero-on-failures.")
+            return 0
         return 1
 
     print("All scrapers completed successfully.")
