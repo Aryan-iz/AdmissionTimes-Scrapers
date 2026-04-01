@@ -1,0 +1,49 @@
+name: Admitly Scraper Pipeline
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  run-scrapers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run scraper pipeline
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          scraperapikey: ${{ secrets.SCRAPER_API_KEY }}
+          Geminiapikey: ${{ secrets.GEMINI_API_KEY }}
+        run: python runner.py
+
+      - name: Upload scraper artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-artifacts-${{ github.run_number }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            **/logs/**
+            **/output/**
+            **/*admissions*.json
