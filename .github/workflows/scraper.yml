@@ -38,12 +38,13 @@ jobs:
           scraperapikey: ${{ secrets.SCRAPER_API_KEY }}
           Geminiapikey: ${{ secrets.GEMINI_API_KEY }}
         run: |
+          set -o pipefail
           attempt=1
           max_attempts=2
 
           while [ "$attempt" -le "$max_attempts" ]; do
             echo "Starting scraper run (attempt $attempt/$max_attempts)"
-            if python runner.py; then
+            if python runner.py 2>&1 | tee runner.log; then
               echo "Scraper run succeeded on attempt $attempt"
               break
             fi
@@ -59,6 +60,16 @@ jobs:
             attempt=$((attempt + 1))
           done
 
+      - name: Print failed scraper summary
+        if: failure()
+        run: |
+          echo "---- Failed scraper lines ----"
+          if [ -f runner.log ]; then
+            grep -E "\[FAILED\]|RUN SUMMARY|Total scrapers|Succeeded|Failed" runner.log || true
+          else
+            echo "runner.log not found"
+          fi
+
       - name: Upload scraper artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -67,6 +78,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
           path: |
+            runner.log
             **/logs/**
             **/output/**
             **/*admissions*.json
