@@ -1,4 +1,4 @@
-name: Admitly Scraper Pipeline
+name: AdmissionTimes Scraper Pipeline
 
 on:
   schedule:
