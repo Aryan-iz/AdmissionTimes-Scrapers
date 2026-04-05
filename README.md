@@ -134,7 +134,7 @@ Workflow file: `.github/workflows/scraper.yml`
 
 ### Triggers
 
-- Daily schedule: `0 4 * * *` (04:00 UTC = 09:00 Pakistan time)
+- Daily schedule: `0 4 * * *` (09:00-11:30 AM Pakistan time)
 - Manual trigger: `workflow_dispatch`
 
 ### Pipeline Steps
