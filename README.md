@@ -2,6 +2,13 @@
 
 Production scraper suite for collecting undergraduate admissions information from multiple Pakistani universities, normalizing records, and writing to PostgreSQL.
 
+## Latest Updates (April 2026)
+
+- Added backend publish workflow support via internal ingestion endpoint integration.
+- Improved publish pipeline configuration for chunked payload delivery.
+- Added parent-child staging migration support for scraper data normalization.
+- Clarified production schedule behavior and runner execution notes.
+
 ## What This Repository Does
 
 - Scrapes admission windows and programs from 6 university sources.
