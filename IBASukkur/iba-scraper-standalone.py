@@ -59,14 +59,12 @@ class Config:
     
     # AI Settings
     OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-    AI_MODEL = "google/gemini-2.0-flash-001"
+    AI_MODEL = "openai/gpt-oss-120b:free"
     AI_TIMEOUT = 30  # seconds
-    GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    GEMINI_MODEL = "gemini-2.0-flash"
 
     # Program extraction strategy
-    # When enabled, scraper uses this stable static list and skips heavy PDF+AI program extraction.
-    USE_STATIC_PROGRAMS_ONLY = True
+    # Gemini is the primary extractor. Static list remains a safe fallback.
+    USE_STATIC_PROGRAMS_ONLY = False
     STATIC_PROGRAMS_OFFERED = [
         "BBA Accounting & Finance",
         "BBA Media & Communication",
@@ -653,10 +651,12 @@ def analyze_pdf_with_ai(pdf_text: str) -> Dict[str, Any]:
         "and return ONLY a JSON object with the following fields:\n"
         "- university (string)\n"
         "- programs_offered (array of program names)\n"
+        "- publish_date (string, if present in text)\n"
+        "- last_date (string, if present in text)\n"
         "- ai_comments (string summarizing the admission status)\n\n"
         "Focus only on UNDERGRADUATE programs (e.g., BS, BBA, BE, etc.). "
         "Return ONLY the JSON, no markdown formatting or explanation.\n\n"
-        f"PDF TEXT:\n{pdf_text[:4000]}"
+        f"PDF TEXT:\n{pdf_text}"
     )
     
     payload = {
@@ -664,7 +664,8 @@ def analyze_pdf_with_ai(pdf_text: str) -> Dict[str, Any]:
         "messages": [
             {"role": "system", "content": "You are a data extractor. Output valid JSON only."},
             {"role": "user", "content": prompt}
-        ]
+        ],
+        "reasoning": {"enabled": True},
     }
     
     try:
@@ -698,74 +699,6 @@ def analyze_pdf_with_ai(pdf_text: str) -> Dict[str, Any]:
         logger.error(f"Failed to parse AI response: {e}")
         raise AIAnalysisError(f"Invalid AI response: {e}")
 
-
-@retry_on_failure(max_attempts=2)
-def analyze_pdf_with_gemini(pdf_text: str) -> Dict[str, Any]:
-    """
-    Analyze PDF text with Gemini API directly.
-
-    Args:
-        pdf_text: Extracted text from PDF
-
-    Returns:
-        Dictionary with analysis results
-    """
-    api_key = os.environ.get("Geminiapikey")
-    if not api_key:
-        logger.warning("Gemini API key not found. Skipping Gemini fallback.")
-        raise AIAnalysisError("Gemini API key not configured")
-
-    logger.info("OpenRouter failed. Falling back to Gemini API...")
-
-    prompt = (
-        "You are an academic data extractor. Analyze the following text extracted from a university admission notice PDF "
-        "and return ONLY a JSON object with the following fields:\n"
-        "- university (string)\n"
-        "- programs_offered (array of program names)\n"
-        "- ai_comments (string summarizing the admission status)\n\n"
-        "Focus only on UNDERGRADUATE programs (e.g., BS, BBA, BE, etc.). "
-        "Return ONLY the JSON, no markdown formatting or explanation.\n\n"
-        f"PDF TEXT:\n{pdf_text[:6000]}"
-    )
-
-    url = Config.GEMINI_API_URL.format(model=Config.GEMINI_MODEL)
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.1,
-            "responseMimeType": "application/json",
-        },
-    }
-
-    try:
-        response = requests.post(
-            f"{url}?key={api_key}",
-            json=payload,
-            timeout=Config.AI_TIMEOUT,
-        )
-        response.raise_for_status()
-
-        gemini_json = response.json()
-        content = gemini_json["candidates"][0]["content"]["parts"][0]["text"]
-
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0].strip()
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0].strip()
-
-        analysis = json.loads(content)
-        logger.info("[OK] Gemini fallback analysis completed successfully")
-        return analysis
-
-    except requests.exceptions.Timeout:
-        logger.error("Gemini API request timed out")
-        raise AIAnalysisError("Gemini API timeout")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Gemini API request failed: {e}")
-        raise AIAnalysisError(f"Gemini API error: {e}")
-    except (KeyError, IndexError, json.JSONDecodeError) as e:
-        logger.error(f"Failed to parse Gemini response: {e}")
-        raise AIAnalysisError(f"Invalid Gemini response: {e}")
 
 # ==============================
 # DATA VALIDATION
@@ -860,10 +793,12 @@ def run_scraper():
         
         pdf_url = None
         pdf_text = None
-        programs_offered = normalize_program_list(Config.STATIC_PROGRAMS_OFFERED)
-        ai_comments = "Using static undergraduate program list"
+        programs_offered = []
+        ai_comments = "Data extracted successfully"
 
         if Config.USE_STATIC_PROGRAMS_ONLY:
+            programs_offered = normalize_program_list(Config.STATIC_PROGRAMS_OFFERED)
+            ai_comments = "Using static undergraduate program list"
             logger.info("Using hardcoded undergraduate program list. Skipping PDF+AI extraction.")
         else:
             # Get PDF link from detail page
@@ -873,20 +808,27 @@ def run_scraper():
                 try:
                     pdf_text = download_and_extract_pdf(pdf_url)
 
-                    # AI Analysis with OpenRouter first, then Gemini fallback.
+                    # AI Analysis using OpenRouter only.
                     ai_result = None
                     try:
                         ai_result = analyze_pdf_with_ai(pdf_text)
                     except AIAnalysisError as openrouter_error:
                         logger.warning(f"OpenRouter analysis failed: {openrouter_error}")
-                        try:
-                            ai_result = analyze_pdf_with_gemini(pdf_text)
-                        except AIAnalysisError as gemini_error:
-                            logger.warning(f"Gemini fallback failed: {gemini_error}")
 
                     if ai_result:
                         ai_programs = normalize_program_list(ai_result.get("programs_offered", []))
                         ai_comments = ai_result.get("ai_comments", "Data extracted successfully")
+
+                        # If Gemini extracts date values from PDF, prefer them when parseable.
+                        ai_publish_date = ai_result.get("publish_date")
+                        ai_last_date = ai_result.get("last_date")
+                        if ai_publish_date:
+                            admission_data["publish_date"] = format_date(str(ai_publish_date).strip())
+                        if ai_last_date:
+                            admission_data["last_date"] = format_date(str(ai_last_date).strip())
+
+                        if ai_programs:
+                            programs_offered = ai_programs
 
                         # If AI output looks merged/noisy, prefer deterministic extraction from PDF text.
                         extracted_programs = extract_programs_from_pdf_text(pdf_text)
@@ -896,8 +838,6 @@ def run_scraper():
                         ):
                             programs_offered = normalize_program_list(extracted_programs)
                             logger.info(f"Normalized programs from PDF text: {len(programs_offered)}")
-                        elif ai_programs:
-                            programs_offered = ai_programs
 
                     # Last fallback from PDF text when both AI providers fail.
                     if not programs_offered and pdf_text:
