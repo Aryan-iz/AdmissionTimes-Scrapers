@@ -61,6 +61,29 @@ class Config:
     OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
     AI_MODEL = "google/gemini-2.0-flash-001"
     AI_TIMEOUT = 30  # seconds
+    GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    GEMINI_MODEL = "gemini-2.0-flash"
+
+    # Program extraction strategy
+    # When enabled, scraper uses this stable static list and skips heavy PDF+AI program extraction.
+    USE_STATIC_PROGRAMS_ONLY = True
+    STATIC_PROGRAMS_OFFERED = [
+        "BBA Accounting & Finance",
+        "BBA Media & Communication",
+        "BBA Physical Education & Sports Sciences",
+        "B.Ed",
+        "BS Computer Science",
+        "BS Software Engineering",
+        "BS Computer Science Specialization in Artificial Intelligence (AI)",
+        "BS Electrical Engineering",
+        "BS Mathematics Specialization in Data Science",
+        "BS Mathematics Specialization in Actuarial & Risk Management",
+        "BS Artificial Intelligence (AI)",
+        "BE Computer Systems Engineering",
+        "BE Electrical Engineering Specialization in Power",
+        "BE Electrical Engineering Specialization in Electronics",
+        "BE Electrical Engineering Specialization in Telecommunication",
+    ]
     
     # Logging Settings
     LOG_LEVEL = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
@@ -246,14 +269,99 @@ def is_undergraduate_program(title: str) -> bool:
     Returns:
         True if undergraduate program, False otherwise
     """
-    undergraduate_keywords = [
-        "undergraduate",
-        "BS",
-        "BBA",
-        "BE",
-        "bachelor"
+    normalized = re.sub(r"[_-]+", " ", title or "")
+
+    # Handle common spelling variants seen on source pages (undergradaute, udergraduate).
+    undergrad_patterns = [
+        r"\bundergrad\w*\b",
+        r"\budergrad\w*\b",
+        r"\bbs\b",
+        r"\bbba\b",
+        r"\bbe\b",
+        r"\bbachelor\w*\b",
     ]
-    return any(re.search(keyword, title, re.I) for keyword in undergraduate_keywords)
+    excluded_patterns = [
+        r"\bms\b",
+        r"\bm\.?phil\b",
+        r"\bph\.?d\b",
+        r"\bmba\b",
+        r"\bdiploma\b",
+    ]
+
+    has_undergrad_signal = any(re.search(p, normalized, re.I) for p in undergrad_patterns)
+    has_excluded_signal = any(re.search(p, normalized, re.I) for p in excluded_patterns)
+
+    # If both exist, prefer undergrad signal for mixed titles.
+    return has_undergrad_signal or (has_undergrad_signal and has_excluded_signal)
+
+
+def score_admission_title(title: str) -> int:
+    """Score announcement titles so the newest, relevant undergrad notice is selected."""
+    text = re.sub(r"[_-]+", " ", (title or "").lower())
+    score = 0
+
+    if "2026" in text:
+        score += 100
+    if re.search(r"\bundergrad\w*\b|\budergrad\w*\b", text):
+        score += 60
+    if "main campus" in text:
+        score += 35
+    if re.search(r"phase\s*[-_]?\s*(i|1)\b", text):
+        score += 25
+
+    # De-prioritize non-undergraduate categories.
+    if re.search(r"\bms\b|\bm\.?phil\b|\bph\.?d\b|\bmba\b|\bdiploma\b", text):
+        score -= 80
+
+    return score
+
+
+def select_preferred_pdf_link(soup: BeautifulSoup) -> Optional[str]:
+    """Select Main Campus Undergraduate Phase-I advertisement PDF when available."""
+    candidates = []
+
+    for link in soup.find_all("a"):
+        link_text = link.get_text(" ", strip=True)
+        href = link.get("href") or ""
+        if not href:
+            continue
+
+        full_link = urljoin(Config.BASE_URL, href)
+        text = re.sub(r"[_-]+", " ", link_text.lower())
+        href_lower = href.lower()
+
+        # Consider only advertisement/PDF style links.
+        if not (
+            href_lower.endswith(".pdf")
+            or "advert" in text
+            or "admission_documents" in href_lower
+        ):
+            continue
+
+        score = 0
+        if all(k in text for k in ["main", "campus", "advertisement"]):
+            score += 200
+        if re.search(r"undergrad\w*|udergrad\w*", text):
+            score += 80
+        if re.search(r"phase\s*[-_]?\s*(i|1)\b", text):
+            score += 70
+        if "2026" in text or "2026" in href_lower:
+            score += 20
+
+        # De-prioritize non-target docs.
+        if "campuses" in text and "main campus" not in text:
+            score -= 40
+        if "sample test" in text or "eligibility" in text:
+            score -= 60
+
+        candidates.append((score, full_link, link_text))
+
+    if not candidates:
+        return None
+
+    best = max(candidates, key=lambda item: item[0])
+    logger.info(f"[OK] Selected PDF link: {best[2]}")
+    return best[1]
 
 
 def clean_program_name(name: str) -> str:
@@ -406,6 +514,7 @@ def scrape_announcements_page(page_num: int) -> Optional[Dict[str, Any]]:
         rows = soup.select("table.course-list-table tbody tr")
         logger.debug(f"Found {len(rows)} rows on page {page_num}")
         
+        candidates = []
         for row in rows:
             cols = row.find_all("th")
             if len(cols) < 5:
@@ -422,16 +531,22 @@ def scrape_announcements_page(page_num: int) -> Optional[Dict[str, Any]]:
             publish_date = cols[4].get_text(strip=True)
             last_date = cols[3].get_text(strip=True)
             
-            # Check if this is an undergraduate admission
+            # Check if this is an undergraduate admission and score it.
             if is_undergraduate_program(title):
-                logger.info(f"[OK] Found undergraduate admission: {title}")
-                
-                return {
+                candidate = {
                     "title": title,
                     "publish_date": format_date(publish_date),
                     "last_date": format_date(last_date),
                     "details_link": full_link
                 }
+                candidates.append((score_admission_title(title), candidate))
+
+        if candidates:
+            # Prefer highest-score announcement (for example 2026 undergraduate main-campus notice).
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            selected = candidates[0][1]
+            logger.info(f"[OK] Found undergraduate admission: {selected['title']}")
+            return selected
         
         logger.debug(f"No undergraduate admissions found on page {page_num}")
         return None
@@ -457,14 +572,10 @@ def scrape_detail_page(detail_url: str) -> Optional[str]:
         response = fetch_page(detail_url, "detail page")
         soup = BeautifulSoup(response.text, "html.parser")
         
-        # Find advertisement PDF link
-        pdf_tag = soup.find("a", string=re.compile(r"Advertisement", re.I))
-        if not pdf_tag:
+        pdf_link = select_preferred_pdf_link(soup)
+        if not pdf_link:
             logger.warning("No advertisement PDF link found on detail page")
             return None
-        
-        pdf_href = pdf_tag.get("href")
-        pdf_link = urljoin(Config.BASE_URL, pdf_href)
         logger.info(f"[OK] Found advertisement PDF: {pdf_link}")
         
         return pdf_link
@@ -587,6 +698,75 @@ def analyze_pdf_with_ai(pdf_text: str) -> Dict[str, Any]:
         logger.error(f"Failed to parse AI response: {e}")
         raise AIAnalysisError(f"Invalid AI response: {e}")
 
+
+@retry_on_failure(max_attempts=2)
+def analyze_pdf_with_gemini(pdf_text: str) -> Dict[str, Any]:
+    """
+    Analyze PDF text with Gemini API directly.
+
+    Args:
+        pdf_text: Extracted text from PDF
+
+    Returns:
+        Dictionary with analysis results
+    """
+    api_key = os.environ.get("Geminiapikey")
+    if not api_key:
+        logger.warning("Gemini API key not found. Skipping Gemini fallback.")
+        raise AIAnalysisError("Gemini API key not configured")
+
+    logger.info("OpenRouter failed. Falling back to Gemini API...")
+
+    prompt = (
+        "You are an academic data extractor. Analyze the following text extracted from a university admission notice PDF "
+        "and return ONLY a JSON object with the following fields:\n"
+        "- university (string)\n"
+        "- programs_offered (array of program names)\n"
+        "- ai_comments (string summarizing the admission status)\n\n"
+        "Focus only on UNDERGRADUATE programs (e.g., BS, BBA, BE, etc.). "
+        "Return ONLY the JSON, no markdown formatting or explanation.\n\n"
+        f"PDF TEXT:\n{pdf_text[:6000]}"
+    )
+
+    url = Config.GEMINI_API_URL.format(model=Config.GEMINI_MODEL)
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    try:
+        response = requests.post(
+            f"{url}?key={api_key}",
+            json=payload,
+            timeout=Config.AI_TIMEOUT,
+        )
+        response.raise_for_status()
+
+        gemini_json = response.json()
+        content = gemini_json["candidates"][0]["content"]["parts"][0]["text"]
+
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0].strip()
+
+        analysis = json.loads(content)
+        logger.info("[OK] Gemini fallback analysis completed successfully")
+        return analysis
+
+    except requests.exceptions.Timeout:
+        logger.error("Gemini API request timed out")
+        raise AIAnalysisError("Gemini API timeout")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Gemini API request failed: {e}")
+        raise AIAnalysisError(f"Gemini API error: {e}")
+    except (KeyError, IndexError, json.JSONDecodeError) as e:
+        logger.error(f"Failed to parse Gemini response: {e}")
+        raise AIAnalysisError(f"Invalid Gemini response: {e}")
+
 # ==============================
 # DATA VALIDATION
 # ==============================
@@ -678,41 +858,59 @@ def run_scraper():
             logger.error("No undergraduate admissions found")
             raise DataExtractionError("No undergraduate admissions found")
         
-        # Get PDF link from detail page
-        pdf_url = scrape_detail_page(admission_data["details_link"])
-        
-        # Download and extract PDF text
+        pdf_url = None
         pdf_text = None
-        programs_offered = []
-        ai_comments = "Data extracted successfully"
-        
-        if pdf_url:
-            try:
-                pdf_text = download_and_extract_pdf(pdf_url)
-                
-                # AI Analysis (optional - continues even if it fails)
-                try:
-                    ai_result = analyze_pdf_with_ai(pdf_text)
-                    programs_offered = normalize_program_list(ai_result.get("programs_offered", []))
-                    ai_comments = ai_result.get("ai_comments", "Data extracted successfully")
+        programs_offered = normalize_program_list(Config.STATIC_PROGRAMS_OFFERED)
+        ai_comments = "Using static undergraduate program list"
 
-                    # If AI returns merged chunks, prefer deterministic PDF extraction.
-                    extracted_programs = extract_programs_from_pdf_text(pdf_text)
-                    if extracted_programs and (
-                        has_combined_program_chunks(programs_offered)
-                        or len(extracted_programs) > len(programs_offered)
-                    ):
-                        programs_offered = normalize_program_list(extracted_programs)
-                        logger.info(f"Normalized programs from PDF text: {len(programs_offered)}")
-                except AIAnalysisError as e:
-                    logger.warning(f"AI analysis failed: {e}")
-                    # Fallback: try to extract programs from PDF text manually
-                    if pdf_text:
+        if Config.USE_STATIC_PROGRAMS_ONLY:
+            logger.info("Using hardcoded undergraduate program list. Skipping PDF+AI extraction.")
+        else:
+            # Get PDF link from detail page
+            pdf_url = scrape_detail_page(admission_data["details_link"])
+
+            if pdf_url:
+                try:
+                    pdf_text = download_and_extract_pdf(pdf_url)
+
+                    # AI Analysis with OpenRouter first, then Gemini fallback.
+                    ai_result = None
+                    try:
+                        ai_result = analyze_pdf_with_ai(pdf_text)
+                    except AIAnalysisError as openrouter_error:
+                        logger.warning(f"OpenRouter analysis failed: {openrouter_error}")
+                        try:
+                            ai_result = analyze_pdf_with_gemini(pdf_text)
+                        except AIAnalysisError as gemini_error:
+                            logger.warning(f"Gemini fallback failed: {gemini_error}")
+
+                    if ai_result:
+                        ai_programs = normalize_program_list(ai_result.get("programs_offered", []))
+                        ai_comments = ai_result.get("ai_comments", "Data extracted successfully")
+
+                        # If AI output looks merged/noisy, prefer deterministic extraction from PDF text.
+                        extracted_programs = extract_programs_from_pdf_text(pdf_text)
+                        if extracted_programs and (
+                            has_combined_program_chunks(ai_programs)
+                            or len(extracted_programs) > len(ai_programs)
+                        ):
+                            programs_offered = normalize_program_list(extracted_programs)
+                            logger.info(f"Normalized programs from PDF text: {len(programs_offered)}")
+                        elif ai_programs:
+                            programs_offered = ai_programs
+
+                    # Last fallback from PDF text when both AI providers fail.
+                    if not programs_offered and pdf_text:
                         programs_offered = normalize_program_list(extract_programs_from_pdf_text(pdf_text)[:30])
                         logger.info(f"Extracted {len(programs_offered)} programs from PDF text")
-                
-            except Exception as e:
-                logger.warning(f"PDF processing failed: {e}")
+
+                except Exception as e:
+                    logger.warning(f"PDF processing failed: {e}")
+
+            # Last safeguard: keep stable static list if extraction produced nothing.
+            if not programs_offered:
+                programs_offered = normalize_program_list(Config.STATIC_PROGRAMS_OFFERED)
+                logger.info("No programs extracted from PDF/AI. Falling back to static list.")
         
         # Detect semester
         semester = detect_current_semester()
