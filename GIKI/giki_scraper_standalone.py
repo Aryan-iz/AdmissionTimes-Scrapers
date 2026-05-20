@@ -287,7 +287,7 @@ def build_output_json(programs: List[str], dates: Dict[str, str]) -> Dict:
     """
     return {
         "university": Config.UNIVERSITY_NAME,
-        "program_title": "Admissions 2025 Undergraduate Programs",
+        "program_title": "Admissions 2026 Undergraduate Programs",
         "publish_date": format_date(dates.get('application_start')),
         "last_date": format_date(dates.get('application_deadline')),
         "details_link": Config.ADMISSIONS_URL,
