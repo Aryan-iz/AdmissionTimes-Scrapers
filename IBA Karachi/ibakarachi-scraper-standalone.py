@@ -1,7 +1,6 @@
 """
 IBA Sukkur Admission Scraper - Standalone Production Version
-All dependencies consolidated into a single file
-Matches MAJU/NUTECH scraper structure with comprehensive logging and standardized output
+
 """
 
 import os
