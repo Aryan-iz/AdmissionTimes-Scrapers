@@ -1,7 +1,5 @@
 """
-NUTECH Undergraduate Admissions Scraper - Standalone Production Version
-All dependencies consolidated into a single file
-Matches MAJU scraper structure with comprehensive logging and standardized output
+NUTECH Undergraduate Admissions Scraper - Standalone  Version
 """
 
 import os
