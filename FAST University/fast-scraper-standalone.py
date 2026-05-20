@@ -154,8 +154,8 @@ def scrape_admission_dates(driver):
                                 start_date_str = re.sub(r'\([^)]*\)', '', start_date_str).strip()
                                 end_date_str = re.sub(r'\([^)]*\)', '', end_date_str).strip()
                                 
-                                dates["publish_date"] = format_date(start_date_str, year=2025)
-                                dates["last_date"] = format_date(end_date_str, year=2025)
+                                dates["publish_date"] = format_date(start_date_str, year=datetime.now().year)
+                                dates["last_date"] = format_date(end_date_str, year=datetime.now().year)
                                 break
             
             if dates["last_date"]:
