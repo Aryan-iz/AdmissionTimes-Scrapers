@@ -1,6 +1,5 @@
 """
 Muhammad Ali Jinnah University Admission Scraper - Standalone Version
-All dependencies consolidated into a single file
 """
 
 import os
