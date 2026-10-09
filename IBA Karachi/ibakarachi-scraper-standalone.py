@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup
 # Add parent directory to path to import db module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from db.insert_admissioin import insert_admission, normalize_admission_record
+from db.date_utils import normalize_to_iso
 
 load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env")))
 
@@ -297,11 +298,12 @@ def determine_active_round(rounds_data):
 
 def build_output_json(round_info, publish_date, last_date):
     """Build standardized output matching NUTECH format"""
+    current_year = datetime.now().year
     return {
         "university": UNIVERSITY_NAME,
-        "program_title": f"Fall 2026 Undergraduate Admissions - {round_info['round']}",
-        "publish_date": publish_date.strftime("%Y-%m-%d") if publish_date else None,
-        "last_date": last_date.strftime("%Y-%m-%d") if last_date else None,
+        "program_title": f"{round_info['round']} Undergraduate Admissions {current_year}",
+        "publish_date": normalize_to_iso(publish_date) if publish_date else None,
+        "last_date": normalize_to_iso(last_date) if last_date else None,
         "details_link": IBA_URL,
         "programs_offered": round_info["programs"]
     }

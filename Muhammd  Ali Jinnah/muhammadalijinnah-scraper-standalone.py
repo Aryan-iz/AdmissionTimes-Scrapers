@@ -23,6 +23,7 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 # Add parent directory to path to import db module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from db.insert_admissioin import insert_admission, normalize_admission_record
+from db.date_utils import normalize_to_iso
 
 # ==============================
 # CONFIGURATION
@@ -492,8 +493,8 @@ def run_scraper():
         raw_data = [{
             "university": Config.UNIVERSITY_NAME,
             "program_title": f"{semester} Undergraduate Admissions",
-            "publish_date": dates.get("publish_date"),
-            "last_date": dates.get("last_date"),
+            "publish_date": normalize_to_iso(dates.get("publish_date")) if dates.get("publish_date") else None,
+            "last_date": normalize_to_iso(dates.get("last_date")) if dates.get("last_date") else None,
             "details_link": Config.ADMISSION_DATES_URL,
             "programs_offered": programs
         }]

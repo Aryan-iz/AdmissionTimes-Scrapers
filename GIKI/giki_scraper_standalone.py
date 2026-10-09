@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 # Add parent directory to path to import db module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from db.insert_admissioin import insert_admission, normalize_admission_record
+from db.date_utils import normalize_to_iso
 
 # Disable SSL warnings only if needed
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -252,27 +253,9 @@ def scrape_admission_dates() -> Optional[Dict[str, str]]:
 # =============================================================================
 
 def format_date(date_str: str) -> str:
-    """
-    Convert date string to ISO format YYYY-MM-DD
-    
-    Args:
-        date_str: Date string like "April 13, 2025"
-        
-    Returns:
-        Formatted date or original string if parsing fails
-    """
     if not date_str:
         return None
-    
-    for fmt in ("%B %d, %Y", "%d-%b-%Y"):
-        try:
-            date_obj = datetime.strptime(date_str, fmt)
-            return date_obj.strftime("%Y-%m-%d")
-        except ValueError:
-            continue
-
-    logger.warning(f"Could not parse date: {date_str}")
-    return date_str
+    return normalize_to_iso(date_str)
 
 def build_output_json(programs: List[str], dates: Dict[str, str]) -> Dict:
     """
@@ -285,9 +268,10 @@ def build_output_json(programs: List[str], dates: Dict[str, str]) -> Dict:
     Returns:
         Structured JSON dict
     """
+    current_year = datetime.now().year
     return {
         "university": Config.UNIVERSITY_NAME,
-        "program_title": "Admissions 2025 Undergraduate Programs",
+        "program_title": f"Admissions {current_year} Undergraduate Programs",
         "publish_date": format_date(dates.get('application_start')),
         "last_date": format_date(dates.get('application_deadline')),
         "details_link": Config.ADMISSIONS_URL,

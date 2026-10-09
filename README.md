@@ -78,7 +78,9 @@ Each scraper normalizes records to this shape before DB write:
 
 Required environment variables:
 
-- `DATABASE_URL`: PostgreSQL connection string.
+- `BACKEND_BASE_URL`: AdmissionTimes backend URL (e.g. `https://api.example.com`).
+- `SCRAPER_INTERNAL_SERVICE_TOKEN`: must equal the backend's `SCRAPER_INTERNAL_SERVICE_TOKEN`.
+- `DATABASE_URL` (optional): scrapers' own mirror table `scraped_admissions`. It is never the app's admissions table.
 - `scraperapikey`: OpenRouter API key used by AI-assisted scraping flows.
 - `Geminiapikey`: Gemini key mapped in CI for compatibility.
 
@@ -87,6 +89,19 @@ Notes:
 - Local runs can load values from root `.env`.
 - CI does not rely on local `.env`; it uses GitHub Secrets.
 - `.env` files are ignored by `.gitignore`.
+
+## How results reach the app
+
+Scrapers never write the app's `admissions` table. `runner.py` collects every
+record in a spool file and, after all scrapers finish, sends them once to the
+backend's `POST /api/v1/internal/scraper/ingest-batch` (`db/backend_ingest.py`).
+The backend matches universities, keeps one admission per university + program
+title, applies verification rules, syncs deadlines (end of day, Pakistan time),
+notifies watchers and records the run in the admin Scraper Monitor.
+
+- A failed push fails the run and keeps the spool; retry with
+  `python runner.py --push-only <spool file>`.
+- `python runner.py --no-push` scrapes without sending to the backend.
 
 ## Local Setup
 
@@ -117,7 +132,9 @@ pip install -r requirements.txt
 Create `.env` in repo root:
 
 ```dotenv
-DATABASE_URL=your_postgres_connection
+BACKEND_BASE_URL=http://localhost:3000
+SCRAPER_INTERNAL_SERVICE_TOKEN=same_as_backend
+DATABASE_URL=your_postgres_connection   # optional mirror
 scraperapikey=your_openrouter_key
 Geminiapikey=your_gemini_key
 ```
@@ -150,19 +167,23 @@ Workflow file: `.github/workflows/scraper.yml`
 2. Setup Python 3.11
 3. Setup Chrome
 4. Install dependencies from root `requirements.txt`
-5. Run `python runner.py` (with one retry on failure)
+5. Run `python runner.py` (with one retry on failure), which pushes results to the backend
 6. Upload artifacts (always)
 
 ### Required GitHub Secrets
 
 Add these under **Settings -> Secrets and variables -> Actions**:
 
-- `DATABASE_URL`
+- `BACKEND_BASE_URL`
+- `SCRAPER_INTERNAL_SERVICE_TOKEN`
+- `DATABASE_URL` (optional)
 - `SCRAPER_API_KEY`
 - `GEMINI_API_KEY`
 
 Mapping used in workflow:
 
+- `BACKEND_BASE_URL` -> `secrets.BACKEND_BASE_URL`
+- `SCRAPER_INTERNAL_SERVICE_TOKEN` -> `secrets.SCRAPER_INTERNAL_SERVICE_TOKEN`
 - `DATABASE_URL` -> `secrets.DATABASE_URL`
 - `scraperapikey` -> `secrets.SCRAPER_API_KEY`
 - `Geminiapikey` -> `secrets.GEMINI_API_KEY`

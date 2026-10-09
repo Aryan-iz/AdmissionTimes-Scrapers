@@ -28,6 +28,7 @@ from selenium.webdriver.chrome.service import Service
 # Add parent directory to path to import db module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from db.insert_admissioin import insert_admission, normalize_admission_record
+from db.date_utils import normalize_to_iso
 
 # ==============================
 # CONFIGURATION
@@ -720,8 +721,8 @@ def run_scraper():
         raw_data = [{
             "university": Config.UNIVERSITY_NAME,
             "program_title": f"{semester} Undergraduate Admissions",
-            "publish_date": scraped_data.get("publish_date"),
-            "last_date": scraped_data.get("last_date"),
+            "publish_date": normalize_to_iso(scraped_data.get("publish_date")) if scraped_data.get("publish_date") else None,
+            "last_date": normalize_to_iso(scraped_data.get("last_date")) if scraped_data.get("last_date") else None,
             "details_link": Config.ADMISSIONS_URL,
             "programs_offered": scraped_data.get("programs", [])
         }]
