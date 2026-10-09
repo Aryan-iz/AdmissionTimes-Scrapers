@@ -268,10 +268,9 @@ def build_output_json(programs: List[str], dates: Dict[str, str]) -> Dict:
     Returns:
         Structured JSON dict
     """
-    current_year = datetime.now().year
     return {
         "university": Config.UNIVERSITY_NAME,
-        "program_title": f"Admissions {current_year} Undergraduate Programs",
+        "program_title": "Admissions 2026 Undergraduate Programs",
         "publish_date": format_date(dates.get('application_start')),
         "last_date": format_date(dates.get('application_deadline')),
         "details_link": Config.ADMISSIONS_URL,

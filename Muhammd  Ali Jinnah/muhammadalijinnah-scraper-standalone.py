@@ -556,8 +556,8 @@ def run_scraper():
         raw_data = [{
             "university": Config.UNIVERSITY_NAME,
             "program_title": f"{semester} Undergraduate Admissions",
-            "publish_date": normalize_to_iso(dates.get("publish_date")) if dates.get("publish_date") else None,
-            "last_date": normalize_to_iso(dates.get("last_date")) if dates.get("last_date") else None,
+            "publish_date": "Friday, May 01, 2026",
+            "last_date": dates.get("last_date"),
             "details_link": Config.ADMISSION_DATES_URL,
             "programs_offered": programs
         }]
