@@ -22,6 +22,7 @@ from urllib.parse import urljoin
 # Add parent directory to path to import db module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from db.insert_admissioin import insert_admission, normalize_admission_record
+from db.date_utils import normalize_to_iso
 
 # PDF handling
 try:
@@ -251,10 +252,11 @@ def format_date(date_string: str) -> str:
     Returns:
         Date in yyyy-mm-dd format or original string if parsing fails
     """
+    # Use shared normalizer that prefers current year when reasonable
     try:
-        return datetime.strptime(date_string, "%d-%m-%Y").strftime("%Y-%m-%d")
+        return normalize_to_iso(date_string)
     except Exception:
-        logger.debug(f"Could not parse date: {date_string}")
+        logger.debug(f"Could not normalize date: {date_string}")
         return date_string
 
 def is_undergraduate_program(title: str) -> bool:

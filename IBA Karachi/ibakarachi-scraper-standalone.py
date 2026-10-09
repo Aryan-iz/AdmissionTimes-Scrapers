@@ -21,6 +21,7 @@ from urllib.parse import urljoin
 # Add parent directory to path to import db module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from db.insert_admissioin import insert_admission, normalize_admission_record
+from db.date_utils import normalize_to_iso
 
 # PDF handling
 try:
@@ -619,52 +620,17 @@ def download_and_extract_pdf(pdf_url: str) -> str:
 # ==============================
 # AI ANALYSIS
 # ==============================
-@retry_on_failure(max_attempts=2)
-def analyze_pdf_with_ai(pdf_text: str) -> Dict[str, Any]:
-    """
-    Analyze PDF text with AI to extract program information
-    
-    Args:
-        pdf_text: Extracted text from PDF
-        
-    Returns:
-        Dictionary with analysis results
-    """
-    api_key = os.environ.get("scraperapikey")
-    
-    if not api_key:
-        logger.warning("AI API key not found. Skipping AI analysis.")
-        raise AIAnalysisError("API key not configured")
-    
-    logger.info("Sending PDF text to AI for analysis...")
-    
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://admitly-scraper.app",
-        "X-Title": "Admitly Scraper"
-    }
-    
-    prompt = (
-        "You are an academic data extractor. Analyze the following text extracted from a university admission notice PDF "
-        "and return ONLY a JSON object with the following fields:\n"
-        "- university (string)\n"
-        "- programs_offered (array of program names)\n"
-        "- publish_date (string, if present in text)\n"
-        "- last_date (string, if present in text)\n"
-        "- ai_comments (string summarizing the admission status)\n\n"
-        "Focus only on UNDERGRADUATE programs (e.g., BS, BBA, BE, etc.). "
-        "Return ONLY the JSON, no markdown formatting or explanation.\n\n"
-        f"PDF TEXT:\n{pdf_text}"
-    )
-    
-    payload = {
-        "model": Config.AI_MODEL,
-        "messages": [
-            {"role": "system", "content": "You are a data extractor. Output valid JSON only."},
-            {"role": "user", "content": prompt}
-        ],
-        "reasoning": {"enabled": True},
+
+def build_output_json(round_info, publish_date, last_date):
+    """Build standardized output matching NUTECH format"""
+    current_year = datetime.now().year
+    return {
+        "university": UNIVERSITY_NAME,
+        "program_title": f"{round_info['round']} Undergraduate Admissions {current_year}",
+        "publish_date": normalize_to_iso(publish_date) if publish_date else None,
+        "last_date": normalize_to_iso(last_date) if last_date else None,
+        "details_link": IBA_URL,
+        "programs_offered": round_info["programs"]
     }
     
     try:
