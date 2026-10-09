@@ -1,7 +1,5 @@
 """
-NUTECH Undergraduate Admissions Scraper - Standalone Production Version
-All dependencies consolidated into a single file
-Matches MAJU scraper structure with comprehensive logging and standardized output
+NUTECH Undergraduate Admissions Scraper - Standalone  Version
 """
 
 import os
@@ -289,7 +287,7 @@ def wait_for_modal_and_close(driver, wait_timeout=10):
 # DATE PARSING FUNCTIONS
 # ==============================
 def parse_date_range(date_str: str, year: Optional[int] = None) -> Optional[datetime]:
-    """Parse date strings like '19 Sep', '19 Sep - 29 Dec', etc."""
+    """Parse date strings like '19 Sep', '19 Sep - 29 Dec', '19 Sep 2026', etc."""
     if not date_str or not isinstance(date_str, str):
         return None
     
@@ -299,14 +297,29 @@ def parse_date_range(date_str: str, year: Optional[int] = None) -> Optional[date
     if not year:
         year = datetime.now().year
     
-    for fmt in (f"{year} %d %b", "%d %b %Y", "%d %B %Y", "%d %b", "%d %B"):
+    # Try to find year in the date string first
+    year_match = re.search(r'\b(\d{4})\b', date_part)
+    if year_match:
+        year = int(year_match.group(1))
+        date_part = re.sub(r'\b\d{4}\b', '', date_part).strip()
+    
+    # Handle day names (e.g., "Monday 19 Sep")
+    day_name_pattern = r'^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*,?\s*'
+    date_part = re.sub(day_name_pattern, '', date_part.strip(), flags=re.I)
+    
+    formats_to_try = [
+        "%d %B",  # "19 September"
+        "%d %b",  # "19 Sep"
+        "%d %B %Y",  # "19 September 2026"
+        "%d %b %Y",  # "19 Sep 2026"
+    ]
+    
+    for fmt in formats_to_try:
         try:
-            if "%Y" not in fmt and year:
-                d = datetime.strptime(f"{year} {date_part}", f"%Y {fmt}")
+            if "%Y" in fmt:
+                d = datetime.strptime(date_part, fmt)
             else:
-                d = datetime.strptime(date_part.strip(), fmt)
-            if d.year == 1900:
-                d = d.replace(year=year)
+                d = datetime.strptime(date_part, fmt).replace(year=year)
             return d
         except ValueError:
             continue
@@ -315,21 +328,53 @@ def parse_date_range(date_str: str, year: Optional[int] = None) -> Optional[date
 
 def extract_dates_from_text(text):
     """Extract possible date patterns and convert to datetime objects."""
-    pattern = r'(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s*(?:\d{2,4})?)'
-    matches = re.findall(pattern, text, re.I)
+    if not text:
+        return []
+    
     dates = []
+    current_year = datetime.now().year
+    
+    # Pattern 1: Full format with day name (e.g., "Saturday, September 19, 2026")
+    pattern1 = r'(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+(\d{1,2})\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})'
+    matches = re.finditer(pattern1, text, re.I)
     for m in matches:
-        date_str = m.strip()
-        for fmt in ("%d %b %Y", "%d %B %Y", "%d %b", "%d %B"):
-            try:
-                d = datetime.strptime(date_str, fmt)
-                if d.year == 1900:
-                    d = d.replace(year=datetime.now().year)
-                dates.append(d)
-                break
-            except Exception:
-                continue
-    return dates
+        try:
+            day_str = m.group(1)
+            month_str = m.group(2)
+            year_str = m.group(3)
+            date_str = f"{day_str} {month_str} {year_str}"
+            d = datetime.strptime(date_str, "%d %B %Y")
+            dates.append(d)
+        except Exception:
+            continue
+    
+    # Pattern 2: Short month format (e.g., "19 Sep 2026" or "19 Sep")
+    pattern2 = r'(\d{1,2})\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s*(?:(\d{2,4}))?'
+    matches = re.finditer(pattern2, text, re.I)
+    for m in matches:
+        day_str = m.group(1)
+        year_str = m.group(2) if m.group(2) else None
+        # Extract the month name from the original text
+        month_match = re.search(r'(\d{1,2})\s+((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*)', text[m.start():m.end()], re.I)
+        if month_match:
+            month_str = month_match.group(2)
+            if year_str and len(year_str) == 2:
+                year_str = f"20{year_str}"
+            elif not year_str:
+                year_str = str(current_year)
+            date_str = f"{day_str} {month_str} {year_str}"
+            for fmt in ("%d %b %Y", "%d %B %Y"):
+                try:
+                    d = datetime.strptime(date_str, fmt)
+                    dates.append(d)
+                    break
+                except Exception:
+                    continue
+    
+    # Remove duplicates and sort
+    unique_dates = list(set(dates))
+    unique_dates.sort()
+    return unique_dates
 
 # ==============================
 # DATA EXTRACTION FUNCTIONS
@@ -362,17 +407,25 @@ def extract_programs(soup: BeautifulSoup) -> List[str]:
 
 def is_within_opportunity_window(registration_start: datetime, registration_end: datetime, 
                                   current_date: Optional[datetime] = None) -> bool:
-    """Check if current date falls within the registration window."""
+    """Check if registration window is active (current or upcoming within 30 days)."""
     if current_date is None:
         current_date = datetime.now()
     
-    # Only include if registration window includes today
-    return registration_start.date() <= current_date.date() <= registration_end.date()
+    current_date_obj = current_date.date() if isinstance(current_date, datetime) else current_date
+    
+    # Include if:
+    # 1. Registration window is currently active (current date within window)
+    # 2. Registration window is upcoming (starts within next 30 days)
+    days_until_start = (registration_start.date() - current_date_obj).days
+    is_active = registration_start.date() <= current_date_obj <= registration_end.date()
+    is_upcoming = 0 < days_until_start <= 30
+    
+    return is_active or is_upcoming
 
 @retry_on_failure()
 def extract_admission_schedule(soup: BeautifulSoup) -> List[Dict]:
     """Extract admission schedule from table and filter by opportunity window."""
-    logger.info("Extracting admission schedule (opportunity window only)...")
+    logger.info("Extracting admission schedule (active or upcoming windows)...")
     current_date = datetime.now()
     schedule_data = []
     
@@ -430,15 +483,15 @@ def extract_admission_schedule(soup: BeautifulSoup) -> List[Dict]:
                         "center": center
                     }
                     schedule_data.append(entry)
-                    logger.info(f"[OK] Added {batch_info} (within opportunity window)")
+                    logger.info(f"[OK] Added {batch_info} (active/upcoming window)")
                 else:
-                    logger.debug(f"✗ Skipped {batch_info} (outside opportunity window)")
+                    logger.debug(f"✗ Skipped {batch_info} (outside 30-day window)")
             
             except Exception as e:
                 logger.debug(f"Error parsing row: {e}")
                 continue
     
-    logger.info(f"[OK] Found {len(schedule_data)} active admission windows")
+    logger.info(f"[OK] Found {len(schedule_data)} active/upcoming admission windows")
     return schedule_data
 
 def extract_section_text(soup: BeautifulSoup, heading_keyword: str) -> Optional[str]:
@@ -499,17 +552,23 @@ def scrape_nutech_data(driver):
 
         # Fallback to page-level published/updated date only when schedule dates are unavailable.
         if not upload_date:
-            upload_match = re.search(r"(Updated|Published|Posted)\s*on[:\-]?\s*(\d{1,2}\s+[A-Za-z]{3,9}\s*\d{2,4})", full_text, re.I)
+            upload_match = re.search(r"(Updated|Published|Posted)\s*on[:\-]?\s*([A-Za-z]*,?\s*\d{1,2}\s+[A-Za-z]{3,9}\s*\d{2,4})", full_text, re.I)
             if upload_match:
                 raw_date = upload_match.group(2).strip()
                 parsed = None
-                for fmt in ("%d %b %Y", "%d %B %Y", "%d %b %y", "%d %B %y"):
-                    try:
-                        parsed = datetime.strptime(raw_date, fmt)
-                        break
-                    except Exception:
-                        continue
-                upload_date = parsed.strftime("%Y-%m-%d") if parsed else raw_date
+                # Try to extract dates from the matched text
+                extracted_dates = extract_dates_from_text(raw_date)
+                if extracted_dates:
+                    parsed = extracted_dates[0]
+                else:
+                    # Fallback to manual parsing
+                    for fmt in ("%d %b %Y", "%d %B %Y", "%d %b %y", "%d %B %y"):
+                        try:
+                            parsed = datetime.strptime(raw_date, fmt)
+                            break
+                        except Exception:
+                            continue
+                upload_date = parsed.strftime("%Y-%m-%d") if parsed else None
         
         # Extract last date from opportunity window
         last_date = None

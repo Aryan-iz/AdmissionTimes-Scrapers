@@ -1,299 +1,624 @@
+"""
+IBA Sukkur Admission Scraper - Standalone Production Version
+
+"""
+
 import os
 import sys
+import re
+import io
 import json
+import time
 import logging
-from dateutil import parser
-from dotenv import load_dotenv
-from datetime import datetime, date
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+import requests
+from datetime import datetime, timezone
+from typing import Optional, Dict, Any, List
+from functools import wraps
+from logging.handlers import RotatingFileHandler
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 # Add parent directory to path to import db module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from db.insert_admissioin import insert_admission, normalize_admission_record
 from db.date_utils import normalize_to_iso
 
-load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env")))
+# PDF handling
+try:
+    from PyPDF2 import PdfReader
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
+
+# ==============================
+# CONFIGURATION
+# ==============================
+class Config:
+    """Configuration settings for the scraper"""
+    
+    # Paths
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    LOGS_DIR = os.path.join(BASE_DIR, "logs")
+    OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+    ENV_FILE = os.path.abspath(os.path.join(BASE_DIR, "..", ".env"))
+    
+    # University Information
+    UNIVERSITY_NAME = "IBA Sukkur"
+    UNIVERSITY_SHORT_NAME = "IBA Sukkur"
+    BASE_URL = "https://www.iba-suk.edu.pk"
+    ADMISSION_URL = f"{BASE_URL}/admissions/announcements"
+    
+    # Request Settings
+    REQUEST_TIMEOUT = 30  # seconds
+    MAX_PAGES = 12  # Maximum pages to search for admissions
+    
+    # Retry Settings
+    MAX_RETRY_ATTEMPTS = 3
+    RETRY_DELAY = 2  # seconds
+    RETRY_BACKOFF_FACTOR = 2  # multiplier for exponential backoff
+    
+    # AI Settings
+    OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+    AI_MODEL = "openai/gpt-oss-120b:free"
+    AI_TIMEOUT = 30  # seconds
+
+    # Program extraction strategy
+    # Gemini is the primary extractor. Static list remains a safe fallback.
+    USE_STATIC_PROGRAMS_ONLY = False
+    STATIC_PROGRAMS_OFFERED = [
+        "BBA Accounting & Finance",
+        "BBA Media & Communication",
+        "BBA Physical Education & Sports Sciences",
+        "B.Ed",
+        "BS Computer Science",
+        "BS Software Engineering",
+        "BS Computer Science Specialization in Artificial Intelligence (AI)",
+        "BS Electrical Engineering",
+        "BS Mathematics Specialization in Data Science",
+        "BS Mathematics Specialization in Actuarial & Risk Management",
+        "BS Artificial Intelligence (AI)",
+        "BE Computer Systems Engineering",
+        "BE Electrical Engineering Specialization in Power",
+        "BE Electrical Engineering Specialization in Electronics",
+        "BE Electrical Engineering Specialization in Telecommunication",
+    ]
+    
+    # Logging Settings
+    LOG_LEVEL = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+    LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    LOG_FILE_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+    LOG_FILE_BACKUP_COUNT = 5
+    
+    @staticmethod
+    def get_output_filename():
+        """Generate timestamped output filename"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return os.path.join(Config.OUTPUT_DIR, f"iba_sukkur_admissions_{timestamp}.json")
+    
+    @staticmethod
+    def get_log_filename():
+        """Generate dated log filename"""
+        date_str = datetime.now().strftime("%Y%m%d")
+        return os.path.join(Config.LOGS_DIR, f"scraper_{date_str}.log")
+    
+    @staticmethod
+    def ensure_directories():
+        """Create necessary directories if they don't exist"""
+        os.makedirs(Config.LOGS_DIR, exist_ok=True)
+        os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
+
+# Initialize directories
+Config.ensure_directories()
+
+# ==============================
+# CUSTOM EXCEPTIONS
+# ==============================
+class ScraperException(Exception):
+    """Base exception for scraper errors"""
+    pass
+
+class DataExtractionError(ScraperException):
+    """Raised when data extraction fails"""
+    pass
+
+class AIAnalysisError(ScraperException):
+    """Raised when AI analysis fails"""
+    pass
 
 # ==============================
 # LOGGING SETUP
 # ==============================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# ==============================
-# CONFIG
-# ==============================
-
-IBA_URL = "https://admissions.iba.edu.pk/admission-schedule-fall2026.php"
-UNIVERSITY_NAME = "IBA Karachi"
-
-# Program name expansions
-PROGRAM_EXPANSIONS = {
-    "BBA": "BBA (Bachelor of Business Administration)",
-    "BSACF": "BSACF (BS Accounting & Finance)",
-    "BSBA (Business Analytics)": "BSBA (BS Business Analytics)",
-    "BS (CS / Math)": "BS (Computer Science / Mathematics)",
-    "BSECO": "BSECO (BS Economics)",
-    "BSEM": "BSEM (BS Econometrics & Mathematical Economics)",
-    "BSEDS": "BSEDS (BS Economics & Data Science)",
-    "BSSS": "BSSS (BS Social Sciences)"
-}
-
-# ==============================
-# SELENIUM SETUP
-# ==============================
-
-def setup_driver():
-    options = Options()
-    options.add_argument("--headless=new")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--window-size=1920,1080")
-    return webdriver.Chrome(options=options)
-
-def load_page_html(driver, url):
-    driver.get(url)
-    WebDriverWait(driver, 15).until(
-        EC.presence_of_element_located((By.TAG_NAME, "table"))
+def setup_logging():
+    """Configure logging with file and console handlers"""
+    logger = logging.getLogger("IBA_Scraper")
+    logger.setLevel(getattr(logging, Config.LOG_LEVEL))
+    
+    # Prevent duplicate handlers
+    if logger.handlers:
+        return logger
+    
+    # File handler with rotation
+    file_handler = RotatingFileHandler(
+        Config.get_log_filename(),
+        maxBytes=Config.LOG_FILE_MAX_BYTES,
+        backupCount=Config.LOG_FILE_BACKUP_COUNT
     )
-    return driver.page_source
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter(Config.LOG_FORMAT)
+    file_handler.setFormatter(file_formatter)
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter("%(levelname)s - %(message)s")
+    console_handler.setFormatter(console_formatter)
+    
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+logger = setup_logging()
 
 # ==============================
-# SCRAPING LOGIC
+# ENVIRONMENT VARIABLES
 # ==============================
-
-def normalize_text(text):
-    """Normalize text by removing extra whitespace, newlines, and tabs"""
-    if not text:
-        return text
-    # Replace multiple whitespace (including newlines and tabs) with single space
-    import re
-    normalized = re.sub(r'\s+', ' ', text)
-    return normalized.strip()
-
-def get_cell_text(cell):
-    """Safely extract deeply nested text (td > p > span)."""
-    text = " ".join(cell.stripped_strings)
-    return normalize_text(text)
-
-def expand_header_row(cells):
-    """Expand header cells according to colspan."""
-    expanded = []
-    for cell in cells:
-        colspan = int(cell.get("colspan", 1))
-        text = get_cell_text(cell)
-        expanded.extend([text] * colspan)
-    return expanded
-
-
-def parse_first_date_from_stage(dates_info, include_keywords):
-    """Return earliest parsed date from matching stages."""
-    parsed_dates = []
-    for stage, date_list in dates_info.items():
-        stage_l = stage.lower()
-        if any(keyword in stage_l for keyword in include_keywords):
-            for date_str in date_list:
-                try:
-                    parsed_dates.append(parser.parse(date_str).date())
-                except Exception:
+def load_env_variables():
+    """Load environment variables from .env file"""
+    if not os.path.exists(Config.ENV_FILE):
+        logger.warning(f".env file not found at {Config.ENV_FILE}")
+        return False
+    
+    try:
+        with open(Config.ENV_FILE, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
                     continue
-    return min(parsed_dates) if parsed_dates else None
-
-
-def parse_last_date_from_stage(dates_info, include_keywords):
-    """Return latest parsed date from matching stages."""
-    parsed_dates = []
-    for stage, date_list in dates_info.items():
-        stage_l = stage.lower()
-        if any(keyword in stage_l for keyword in include_keywords):
-            for date_str in date_list:
-                try:
-                    parsed_dates.append(parser.parse(date_str).date())
-                except Exception:
+                if "=" not in line:
                     continue
-    return max(parsed_dates) if parsed_dates else None
+                key, value = line.split("=", 1)
+                os.environ[key.strip()] = value.strip()
+        logger.info("[OK] Environment variables loaded successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to load .env file: {e}")
+        return False
 
-def parse_round_table(table, round_name):
+# ==============================
+# RETRY DECORATOR
+# ==============================
+def retry_on_failure(max_attempts=None, delay=None, backoff=None):
+    """Decorator to retry function on failure with exponential backoff"""
+    if max_attempts is None:
+        max_attempts = Config.MAX_RETRY_ATTEMPTS
+    if delay is None:
+        delay = Config.RETRY_DELAY
+    if backoff is None:
+        backoff = Config.RETRY_BACKOFF_FACTOR
+    
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            attempt = 1
+            current_delay = delay
+            
+            while attempt <= max_attempts:
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if attempt == max_attempts:
+                        logger.error(f"{func.__name__} failed after {max_attempts} attempts: {e}")
+                        raise
+                    
+                    logger.warning(f"{func.__name__} attempt {attempt}/{max_attempts} failed: {e}. Retrying in {current_delay}s...")
+                    time.sleep(current_delay)
+                    current_delay *= backoff
+                    attempt += 1
+            
+        return wrapper
+    return decorator
+
+# ==============================
+# SEMESTER DETECTION
+# ==============================
+def detect_current_semester():
+    """Detect current semester based on current date"""
+    now = datetime.now()
+    year = now.year
+    month = now.month
+    
+    # Spring semester: January - June
+    # Fall semester: July - December
+    # Keep current calendar year.
+    if 1 <= month <= 6:
+        semester = "Spring"
+    else:
+        semester = "Fall"
+    
+    return f"{semester} {year}"
+
+# ==============================
+# UTILITY FUNCTIONS
+# ==============================
+def format_date(date_string: str) -> str:
     """
-    Parse a single round table (Round 1 or Round 2)
-    and return ONLY undergraduate admissions with dates and programs.
+    Format date from dd-mm-yyyy to yyyy-mm-dd
+    
+    Args:
+        date_string: Date in dd-mm-yyyy format
+        
+    Returns:
+        Date in yyyy-mm-dd format or original string if parsing fails
     """
-    rows = table.find_all("tr")
-    if not rows:
-        return {"round": round_name, "programs": [], "dates": {}}
+    try:
+        return datetime.strptime(date_string, "%d-%m-%Y").strftime("%Y-%m-%d")
+    except Exception:
+        logger.debug(f"Could not parse date: {date_string}")
+        return date_string
 
-    # Find the level row dynamically (contains Undergraduate/Postgraduate markers)
-    level_row_idx = None
-    level_row = []
-    for idx, row in enumerate(rows):
-        cells = row.find_all(["td", "th"])
-        expanded = expand_header_row(cells)
-        joined = " ".join([c.lower() for c in expanded if c])
-        if "undergraduate" in joined:
-            level_row_idx = idx
-            level_row = expanded
-            break
+def is_undergraduate_program(title: str) -> bool:
+    """
+    Check if the program title indicates an undergraduate admission
+    
+    Args:
+        title: Program title to check
+        
+    Returns:
+        True if undergraduate program, False otherwise
+    """
+    normalized = re.sub(r"[_-]+", " ", title or "")
 
-    if level_row_idx is None:
-        logger.warning(f"Could not locate level row for {round_name}")
-        return {"round": round_name, "programs": [], "dates": {}}
-
-    # Find the program row dynamically (first row after level row with BS/BBA labels)
-    program_row_idx = None
-    program_row = []
-    for idx in range(level_row_idx + 1, len(rows)):
-        cells = rows[idx].find_all(["td", "th"])
-        expanded = expand_header_row(cells)
-        if any(
-            text and (
-                text.strip().upper().startswith("BS") or
-                text.strip().upper().startswith("BBA")
-            )
-            for text in expanded
-        ):
-            program_row_idx = idx
-            program_row = expanded
-            break
-
-    if program_row_idx is None:
-        logger.warning(f"Could not locate program row for {round_name}")
-        return {"round": round_name, "programs": [], "dates": {}}
-
-    # Identify undergraduate column indices
-    ug_columns = [
-        i for i, level in enumerate(level_row)
-        if level and "undergraduate" in level.lower()
+    # Handle common spelling variants seen on source pages (undergradaute, udergraduate).
+    undergrad_patterns = [
+        r"\bundergrad\w*\b",
+        r"\budergrad\w*\b",
+        r"\bbs\b",
+        r"\bbba\b",
+        r"\bbe\b",
+        r"\bbachelor\w*\b",
+    ]
+    excluded_patterns = [
+        r"\bms\b",
+        r"\bm\.?phil\b",
+        r"\bph\.?d\b",
+        r"\bmba\b",
+        r"\bdiploma\b",
     ]
 
-    # Extract all programs for undergraduate columns
-    programs = []
-    for idx in ug_columns:
-        if idx < len(program_row):
-            program_text = program_row[idx]
-            if program_text and program_text not in ["-", "N/A"]:
-                # Split multiple programs (e.g., "BBA, BSACF & BSBA")
-                prog_list = [p.strip() for p in program_text.replace("&", ",").split(",")]
-                programs.extend([p for p in prog_list if p])
+    has_undergrad_signal = any(re.search(p, normalized, re.I) for p in undergrad_patterns)
+    has_excluded_signal = any(re.search(p, normalized, re.I) for p in excluded_patterns)
 
-    # Remove duplicates while preserving order
-    programs = list(dict.fromkeys(programs))
-    
-    # Expand program names to include full forms
-    programs = [PROGRAM_EXPANSIONS.get(p, p) for p in programs]
+    # If both exist, prefer undergrad signal for mixed titles.
+    return has_undergrad_signal or (has_undergrad_signal and has_excluded_signal)
 
-    # Extract dates from DATA ROWS (rows after program row)
-    dates_info = {}
-    for row in rows[program_row_idx + 1:]:
-        cells = row.find_all("td")
-        if not cells:
+
+def score_admission_title(title: str) -> int:
+    """Score announcement titles so the newest, relevant undergrad notice is selected."""
+    text = re.sub(r"[_-]+", " ", (title or "").lower())
+    score = 0
+
+    if "2026" in text:
+        score += 100
+    if re.search(r"\bundergrad\w*\b|\budergrad\w*\b", text):
+        score += 60
+    if "main campus" in text:
+        score += 35
+    if re.search(r"phase\s*[-_]?\s*(i|1)\b", text):
+        score += 25
+
+    # De-prioritize non-undergraduate categories.
+    if re.search(r"\bms\b|\bm\.?phil\b|\bph\.?d\b|\bmba\b|\bdiploma\b", text):
+        score -= 80
+
+    return score
+
+
+def select_preferred_pdf_link(soup: BeautifulSoup) -> Optional[str]:
+    """Select Main Campus Undergraduate Phase-I advertisement PDF when available."""
+    candidates = []
+
+    for link in soup.find_all("a"):
+        link_text = link.get_text(" ", strip=True)
+        href = link.get("href") or ""
+        if not href:
             continue
 
-        stage = get_cell_text(cells[0])
-        date_cells = cells[1:]
+        full_link = urljoin(Config.BASE_URL, href)
+        text = re.sub(r"[_-]+", " ", link_text.lower())
+        href_lower = href.lower()
 
-        for idx in ug_columns:
-            if idx >= len(date_cells):
-                continue
+        # Consider only advertisement/PDF style links.
+        if not (
+            href_lower.endswith(".pdf")
+            or "advert" in text
+            or "admission_documents" in href_lower
+        ):
+            continue
 
-            date_value = get_cell_text(date_cells[idx])
-            if not date_value or date_value.lower() in ["-", "n/a"]:
-                continue
+        score = 0
+        if all(k in text for k in ["main", "campus", "advertisement"]):
+            score += 200
+        if re.search(r"undergrad\w*|udergrad\w*", text):
+            score += 80
+        if re.search(r"phase\s*[-_]?\s*(i|1)\b", text):
+            score += 70
+        if "2026" in text or "2026" in href_lower:
+            score += 20
 
-            # Store dates by stage
-            if stage not in dates_info:
-                dates_info[stage] = []
-            dates_info[stage].append(date_value)
+        # De-prioritize non-target docs.
+        if "campuses" in text and "main campus" not in text:
+            score -= 40
+        if "sample test" in text or "eligibility" in text:
+            score -= 60
 
-    return {
-        "round": round_name,
-        "programs": programs,
-        "dates": dates_info
+        candidates.append((score, full_link, link_text))
+
+    if not candidates:
+        return None
+
+    best = max(candidates, key=lambda item: item[0])
+    logger.info(f"[OK] Selected PDF link: {best[2]}")
+    return best[1]
+
+
+def clean_program_name(name: str) -> str:
+    """Clean OCR/PDF artifacts in extracted program names."""
+    if not name:
+        return ""
+
+    cleaned = str(name)
+
+    # Normalize common ligatures and unicode artifacts from PDF extraction.
+    replacements = {
+        "\ufb01": "fi",
+        "\ufb02": "fl",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2019": "'",
+        "\u00a0": " ",
     }
+    for src, dst in replacements.items():
+        cleaned = cleaned.replace(src, dst)
 
-def scrape_raw_undergraduate_data(html):
-    soup = BeautifulSoup(html, "html.parser")
-    tables = soup.select("div#main table.w3-table.w3-striped")
+    # Fix common OCR misspellings seen in this source.
+    cleaned = re.sub(r"\bActurial\b", "Actuarial", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bArti\s*ficial\b", "Artificial", cleaned, flags=re.IGNORECASE)
 
-    results = []
-    if len(tables) >= 1:
-        results.append(parse_round_table(tables[0], "Round 1"))
-    if len(tables) >= 2:
-        results.append(parse_round_table(tables[1], "Round 2"))
-    return results
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -,:;\t\n\r")
+    return cleaned
+
+
+def extract_programs_from_pdf_text(pdf_text: str) -> List[str]:
+    """Extract undergraduate program names from PDF text and split merged strings."""
+    if not pdf_text:
+        return []
+
+    # Match each program starting with a known undergraduate prefix and stop
+    # when the next program prefix starts or line/document ends.
+    pattern = re.compile(
+        r'(?:BBA|B\.Ed|BE|BS)\s+[A-Za-z][A-Za-z0-9&(),/\-\s]{2,120}?(?=(?:\s(?:BBA|B\.Ed|BE|BS)\s)|\n|$)',
+        re.IGNORECASE,
+    )
+
+    found = []
+    for m in pattern.finditer(pdf_text):
+        item = clean_program_name(m.group(0))
+        if len(item) >= 6:
+            found.append(item)
+
+    # Deduplicate while preserving order
+    deduped = []
+    seen = set()
+    for item in found:
+        key = item.lower()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(item)
+
+    return deduped
+
+
+def has_combined_program_chunks(programs: List[str]) -> bool:
+    """Heuristic: detect likely merged program strings from AI output."""
+    for p in programs:
+        token_count = len(p.split())
+        if token_count > 10 and "," not in p:
+            return True
+    return False
+
+
+def normalize_program_list(programs: List[str]) -> List[str]:
+    """Apply final cleanup and dedupe for program list."""
+    normalized = []
+    seen = set()
+    for p in programs or []:
+        cleaned = clean_program_name(p)
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key not in seen:
+            seen.add(key)
+            normalized.append(cleaned)
+    return normalized
 
 # ==============================
-# DETERMINE ACTIVE ROUND
+# PDF PROCESSING
 # ==============================
-
-def determine_active_round(rounds_data):
+def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     """
-    Determine which round is currently in the opportunity window
-    based on today's date.
-    """
-    today = datetime.today().date()
+    Extract text from PDF bytes
     
-    rounds_with_windows = []
-
-    for round_info in rounds_data:
-        dates_info = round_info["dates"]
-
-        forms_start = parse_first_date_from_stage(
-            dates_info,
-            ["online forms", "availability", "application start", "applications open", "forms open"]
-        )
-        form_deadline = parse_last_date_from_stage(
-            dates_info,
-            ["form submission", "deadline", "last date", "application deadline", "close"]
-        )
-
-        rounds_with_windows.append((round_info, forms_start, form_deadline))
-
-    # 1) Prefer currently active round window
-    for round_info, forms_start, form_deadline in rounds_with_windows:
-        if forms_start and form_deadline:
-            if forms_start <= today <= form_deadline:
-                logger.info(f"✓ Active round: {round_info['round']} (Window: {forms_start} to {form_deadline})")
-                return round_info, forms_start, form_deadline
-
-    # 2) If none active, pick the nearest upcoming round by start date
-    upcoming = [
-        (round_info, forms_start, form_deadline)
-        for round_info, forms_start, form_deadline in rounds_with_windows
-        if forms_start and forms_start >= today
-    ]
-    if upcoming:
-        upcoming.sort(key=lambda item: item[1])
-        round_info, forms_start, form_deadline = upcoming[0]
-        logger.info(f"✓ Upcoming round selected: {round_info['round']} (Starts: {forms_start})")
-        return round_info, forms_start, form_deadline
-
-    # 3) Fallback: if no upcoming start exists, choose round with latest known deadline
-    with_deadlines = [
-        (round_info, forms_start, form_deadline)
-        for round_info, forms_start, form_deadline in rounds_with_windows
-        if form_deadline
-    ]
-    if with_deadlines:
-        with_deadlines.sort(key=lambda item: item[2], reverse=True)
-        round_info, forms_start, form_deadline = with_deadlines[0]
-        logger.warning(f"No active/upcoming start date found. Using latest deadline round: {round_info['round']}")
-        return round_info, forms_start, form_deadline
-
-    # 4) Final fallback
-    logger.warning("Could not derive round window; falling back to first parsed round")
-    return rounds_data[0], None, None
+    Args:
+        pdf_bytes: PDF content as bytes
+        
+    Returns:
+        Extracted text from PDF
+    """
+    if not PDF_AVAILABLE:
+        logger.warning("PyPDF2 not installed. Cannot extract PDF text.")
+        return ""
+    
+    try:
+        pdf_file = io.BytesIO(pdf_bytes)
+        pdf_reader = PdfReader(pdf_file)
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() + "\n"
+        logger.info(f"[OK] Extracted {len(text)} characters from PDF")
+        return text
+    except Exception as e:
+        logger.warning(f"Failed to extract text from PDF: {e}")
+        return ""
 
 # ==============================
-# BUILD OUTPUT
+# DATA EXTRACTION FUNCTIONS
+# ==============================
+@retry_on_failure()
+def fetch_page(url: str, description: str) -> requests.Response:
+    """
+    Fetch a webpage with retry logic
+    
+    Args:
+        url: URL to fetch
+        description: Description for logging
+        
+    Returns:
+        Response object
+    """
+    logger.debug(f"Fetching {description}: {url}")
+    response = requests.get(url, timeout=Config.REQUEST_TIMEOUT)
+    response.raise_for_status()
+    logger.debug(f"[OK] Successfully fetched {description}")
+    return response
+
+@retry_on_failure()
+def scrape_announcements_page(page_num: int) -> Optional[Dict[str, Any]]:
+    """
+    Scrape a single announcements page looking for undergraduate admissions
+    
+    Args:
+        page_num: Page number to scrape
+        
+    Returns:
+        Dictionary with admission data or None if not found
+    """
+    url = f"{Config.ADMISSION_URL}?page={page_num}"
+    logger.info(f"Scraping announcements page {page_num}")
+    
+    try:
+        response = fetch_page(url, f"announcements page {page_num}")
+        soup = BeautifulSoup(response.text, "html.parser")
+        rows = soup.select("table.course-list-table tbody tr")
+        logger.debug(f"Found {len(rows)} rows on page {page_num}")
+        
+        candidates = []
+        for row in rows:
+            cols = row.find_all("th")
+            if len(cols) < 5:
+                continue
+            
+            # Extract basic information
+            title_tag = cols[1].find("a", class_="modal-link")
+            if not title_tag:
+                continue
+            
+            title = title_tag.get_text(strip=True)
+            target_url = title_tag.get("data-targeturl")
+            full_link = urljoin(Config.BASE_URL, target_url)
+            publish_date = cols[4].get_text(strip=True)
+            last_date = cols[3].get_text(strip=True)
+            
+            # Check if this is an undergraduate admission and score it.
+            if is_undergraduate_program(title):
+                candidate = {
+                    "title": title,
+                    "publish_date": format_date(publish_date),
+                    "last_date": format_date(last_date),
+                    "details_link": full_link
+                }
+                candidates.append((score_admission_title(title), candidate))
+
+        if candidates:
+            # Prefer highest-score announcement (for example 2026 undergraduate main-campus notice).
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            selected = candidates[0][1]
+            logger.info(f"[OK] Found undergraduate admission: {selected['title']}")
+            return selected
+        
+        logger.debug(f"No undergraduate admissions found on page {page_num}")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error scraping page {page_num}: {e}")
+        raise DataExtractionError(f"Failed to scrape page {page_num}: {e}")
+
+@retry_on_failure()
+def scrape_detail_page(detail_url: str) -> Optional[str]:
+    """
+    Scrape detail page to get PDF link
+    
+    Args:
+        detail_url: URL of the detail page
+        
+    Returns:
+        PDF URL or None if not found
+    """
+    logger.info("Scraping detail page for PDF link")
+    
+    try:
+        response = fetch_page(detail_url, "detail page")
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        pdf_link = select_preferred_pdf_link(soup)
+        if not pdf_link:
+            logger.warning("No advertisement PDF link found on detail page")
+            return None
+        logger.info(f"[OK] Found advertisement PDF: {pdf_link}")
+        
+        return pdf_link
+        
+    except Exception as e:
+        logger.error(f"Error scraping detail page: {e}")
+        raise DataExtractionError(f"Failed to scrape detail page: {e}")
+
+@retry_on_failure()
+def download_and_extract_pdf(pdf_url: str) -> str:
+    """
+    Download PDF and extract text
+    
+    Args:
+        pdf_url: URL of the PDF to download
+        
+    Returns:
+        Extracted text from PDF
+    """
+    logger.info(f"Downloading PDF from {pdf_url}")
+
+    if not PDF_AVAILABLE:
+        logger.warning("PyPDF2 not installed. Skipping PDF text extraction.")
+        return ""
+    
+    try:
+        response = requests.get(pdf_url, timeout=Config.REQUEST_TIMEOUT)
+        response.raise_for_status()
+        pdf_bytes = response.content
+        logger.info(f"[OK] Downloaded PDF ({len(pdf_bytes)} bytes)")
+        
+        # Extract text
+        pdf_text = extract_text_from_pdf(pdf_bytes)
+        if not pdf_text:
+            logger.warning("PDF text extraction returned empty content")
+            return ""
+        
+        return pdf_text
+        
+    except Exception as e:
+        logger.error(f"Error downloading/extracting PDF: {e}")
+        raise DataExtractionError(f"Failed to process PDF: {e}")
+
+# ==============================
+# AI ANALYSIS
 # ==============================
 
 def build_output_json(round_info, publish_date, last_date):
@@ -307,11 +632,42 @@ def build_output_json(round_info, publish_date, last_date):
         "details_link": IBA_URL,
         "programs_offered": round_info["programs"]
     }
+    
+    try:
+        response = requests.post(
+            Config.OPENROUTER_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=Config.AI_TIMEOUT
+        )
+        response.raise_for_status()
+        
+        ai_content = response.json()['choices'][0]['message']['content']
+        
+        # Strip markdown code blocks if present
+        if "```json" in ai_content:
+            ai_content = ai_content.split("```json")[1].split("```")[0].strip()
+        elif "```" in ai_content:
+            ai_content = ai_content.split("```")[1].split("```")[0].strip()
+        
+        analysis = json.loads(ai_content)
+        logger.info("[OK] AI analysis completed successfully")
+        return analysis
+        
+    except requests.exceptions.Timeout:
+        logger.error("AI API request timed out")
+        raise AIAnalysisError("AI API timeout")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"AI API request failed: {e}")
+        raise AIAnalysisError(f"AI API error: {e}")
+    except (KeyError, json.JSONDecodeError) as e:
+        logger.error(f"Failed to parse AI response: {e}")
+        raise AIAnalysisError(f"Invalid AI response: {e}")
+
 
 # ==============================
 # DATA VALIDATION
 # ==============================
-
 def validate_scraped_data(data):
     """Validate scraped data quality"""
     issues = []
@@ -325,111 +681,199 @@ def validate_scraped_data(data):
     if issues:
         logger.warning(f"Data validation issues: {', '.join(issues)}")
     else:
-        logger.info("✓ Data validation passed")
+        logger.info("[OK] Data validation passed")
     
     return len(issues) == 0, issues
 
 # ==============================
 # DATA PERSISTENCE
 # ==============================
-
 def insert_to_database(data):
     """Insert data into PostgreSQL database"""
     try:
+        # Data should be a list with a single record
         if isinstance(data, list) and len(data) > 0:
             record = data[0]
             logger.info("Inserting data into database...")
             insert_admission(record)
-            logger.info("✓ Data successfully inserted into database")
+            logger.info("[OK] Data successfully inserted into database")
             return True
         else:
             logger.error("Invalid data format for database insertion")
             return False
     except Exception as e:
         logger.error(f"Failed to insert data into database: {e}")
-        return False
+        raise
 
-def save_to_json(data, filename="iba_karachi_admissions.json"):
-    """Save data to JSON file (backup only)"""
-    output_dir = os.path.join(os.path.dirname(__file__), "output")
-    os.makedirs(output_dir, exist_ok=True)
-    
-    filepath = os.path.join(output_dir, filename)
+def save_to_json(data, filename=None):
+    """Save data to JSON file with atomic write (backup only)"""
+    if filename is None:
+        filename = Config.get_output_filename()
     
     try:
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump([data], f, indent=2, ensure_ascii=False)
+        # Write to temporary file first
+        temp_filename = filename + ".tmp"
+        with open(temp_filename, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
         
-        logger.info(f"✓ Backup data saved to {filepath}")
-        return filepath
+        # Atomic rename
+        if os.path.exists(filename):
+            os.remove(filename)
+        os.rename(temp_filename, filename)
+        
+        logger.info(f"[OK] Backup data saved to {filename}")
+        return filename
+        
     except Exception as e:
         logger.error(f"Failed to save backup data: {e}")
         raise
 
 # ==============================
-# MAIN PIPELINE
+# MAIN SCRAPER
 # ==============================
-
-def scrape_iba_karachi():
+def run_scraper():
+    """Main scraper execution function"""
+    start_time = time.time()
     logger.info("="*60)
-    logger.info("IBA Karachi Admission Scraper - Standalone Version")
+    logger.info("IBA Sukkur Admission Scraper - Standalone Version")
     logger.info("="*60)
     
-    driver = setup_driver()
+    # Load environment variables
+    load_env_variables()
+    
     try:
-        # Step 1: Load page
-        logger.info("Loading admission schedule page...")
-        html = load_page_html(driver, IBA_URL)
+        # Search for latest undergraduate admission
+        logger.info("Searching for latest undergraduate admission...")
+        admission_data = None
         
-        # Step 2: Scrape all rounds
-        logger.info("Extracting admission data...")
-        rounds_data = scrape_raw_undergraduate_data(html)
+        for page in range(1, Config.MAX_PAGES + 1):
+            result = scrape_announcements_page(page)
+            if result:
+                admission_data = result
+                break
         
-        if not rounds_data:
-            logger.error("No admission data found")
-            return None
+        if not admission_data:
+            logger.error("No undergraduate admissions found")
+            raise DataExtractionError("No undergraduate admissions found")
         
-        logger.info(f"✓ Found {len(rounds_data)} admission rounds")
+        pdf_url = None
+        pdf_text = None
+        programs_offered = []
+        ai_comments = "Data extracted successfully"
+
+        if Config.USE_STATIC_PROGRAMS_ONLY:
+            programs_offered = normalize_program_list(Config.STATIC_PROGRAMS_OFFERED)
+            ai_comments = "Using static undergraduate program list"
+            logger.info("Using hardcoded undergraduate program list. Skipping PDF+AI extraction.")
+        else:
+            # Get PDF link from detail page
+            pdf_url = scrape_detail_page(admission_data["details_link"])
+
+            if pdf_url:
+                try:
+                    pdf_text = download_and_extract_pdf(pdf_url)
+
+                    # AI Analysis using OpenRouter only.
+                    ai_result = None
+                    try:
+                        ai_result = analyze_pdf_with_ai(pdf_text)
+                    except AIAnalysisError as openrouter_error:
+                        logger.warning(f"OpenRouter analysis failed: {openrouter_error}")
+
+                    if ai_result:
+                        ai_programs = normalize_program_list(ai_result.get("programs_offered", []))
+                        ai_comments = ai_result.get("ai_comments", "Data extracted successfully")
+
+                        # If Gemini extracts date values from PDF, prefer them when parseable.
+                        ai_publish_date = ai_result.get("publish_date")
+                        ai_last_date = ai_result.get("last_date")
+                        if ai_publish_date:
+                            admission_data["publish_date"] = format_date(str(ai_publish_date).strip())
+                        if ai_last_date:
+                            admission_data["last_date"] = format_date(str(ai_last_date).strip())
+
+                        if ai_programs:
+                            programs_offered = ai_programs
+
+                        # If AI output looks merged/noisy, prefer deterministic extraction from PDF text.
+                        extracted_programs = extract_programs_from_pdf_text(pdf_text)
+                        if extracted_programs and (
+                            has_combined_program_chunks(ai_programs)
+                            or len(extracted_programs) > len(ai_programs)
+                        ):
+                            programs_offered = normalize_program_list(extracted_programs)
+                            logger.info(f"Normalized programs from PDF text: {len(programs_offered)}")
+
+                    # Last fallback from PDF text when both AI providers fail.
+                    if not programs_offered and pdf_text:
+                        programs_offered = normalize_program_list(extract_programs_from_pdf_text(pdf_text)[:30])
+                        logger.info(f"Extracted {len(programs_offered)} programs from PDF text")
+
+                except Exception as e:
+                    logger.warning(f"PDF processing failed: {e}")
+
+            # Last safeguard: keep stable static list if extraction produced nothing.
+            if not programs_offered:
+                programs_offered = normalize_program_list(Config.STATIC_PROGRAMS_OFFERED)
+                logger.info("No programs extracted from PDF/AI. Falling back to static list.")
         
-        # Step 3: Determine active round
-        active_round, publish_date, last_date = determine_active_round(rounds_data)
+        # Detect semester
+        semester = detect_current_semester()
+        logger.info(f"Detected semester: {semester}")
         
-        # Step 4: Build output
-        output_data = normalize_admission_record(build_output_json(active_round, publish_date, last_date))
+        # Structure final data with flattened format
+        final_data = [{
+            "university": Config.UNIVERSITY_NAME,
+            "program_title": admission_data["title"],
+            "publish_date": admission_data["publish_date"],
+            "last_date": admission_data["last_date"],
+            "details_link": admission_data["details_link"],
+            "programs_offered": programs_offered
+        }]
+        final_data = [normalize_admission_record(final_data[0])]
         
-        logger.info(f"Programs found: {len(output_data['programs_offered'])}")
-        logger.info(f"Last date: {output_data.get('last_date', 'N/A')}")
-        
-        # Step 5: Validate data
-        is_valid, issues = validate_scraped_data(output_data)
+        # Validate data
+        is_valid, issues = validate_scraped_data(final_data[0])
         if not is_valid:
             logger.warning(f"Data quality issues detected: {issues}")
         
-        # Step 6: Save backup to file (always runs)
-        save_to_json(output_data)
+        # Insert into database
+        insert_to_database(final_data)
         
-        # Step 7: Insert into database (non-fatal if fails)
-        insert_to_database([output_data])
+        # Also save backup to file
+        output_file = save_to_json(final_data)
         
-        # Step 8: Display output
+        # Print summary
+        execution_time = time.time() - start_time
         logger.info("="*60)
-        logger.info("FINAL OUTPUT:")
-        logger.info("="*60)
-        print(json.dumps([output_data], indent=2))
+        logger.info("SCRAPING COMPLETED SUCCESSFULLY")
+        logger.info(f"Execution time: {execution_time:.2f} seconds")
+        logger.info(f"Backup file: {output_file}")
+        logger.info(f"Programs found: {len(programs_offered)}")
+        logger.info(f"Last date: {admission_data['last_date']}")
         logger.info("="*60)
         
-        return output_data
+        # Print final output to console
+        print("\n--- FINAL OUTPUT ---")
+        print(json.dumps(final_data, indent=2))
         
-    finally:
-        driver.quit()
-        logger.info("WebDriver closed")
+        return final_data
+        
+    except ScraperException as e:
+        logger.error(f"Scraper error: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}", exc_info=True)
+        raise
 
-
+# ==============================
+# ENTRY POINT
+# ==============================
 if __name__ == "__main__":
     try:
-        scrape_iba_karachi()
+        run_scraper()
     except KeyboardInterrupt:
         logger.info("Scraper interrupted by user")
     except Exception as e:
-        logger.critical(f"Scraper failed: {e}", exc_info=True)
+        logger.critical(f"Scraper failed: {e}")
         exit(1)

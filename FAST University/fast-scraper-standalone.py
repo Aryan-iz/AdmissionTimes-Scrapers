@@ -1,6 +1,5 @@
 """
 FAST University Admission Scraper - Standalone Version
-Extracts undergraduate programs and admission dates using Selenium
 """
 
 import os

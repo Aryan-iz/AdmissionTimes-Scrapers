@@ -1,15 +1,16 @@
 """
 Muhammad Ali Jinnah University Admission Scraper - Standalone Version
-All dependencies consolidated into a single file
 """
 
 import os
 import sys
+import re
 import json
 import time
 import logging
 import requests
 from datetime import datetime
+from typing import Optional
 from functools import wraps
 from logging.handlers import RotatingFileHandler
 from bs4 import BeautifulSoup
@@ -160,6 +161,49 @@ def load_env_variables():
         return False
 
 # ==============================
+# DATE PARSING FUNCTIONS
+# ==============================
+def parse_date_string(date_str: str) -> Optional[str]:
+    """Parse date strings like 'Saturday, August 8, 2026' and convert to ISO format (YYYY-MM-DD)"""
+    if not date_str or not isinstance(date_str, str):
+        return None
+    
+    date_str = date_str.strip()
+    
+    # Pattern: "Day, Month Date, Year" (e.g., "Saturday, August 8, 2026")
+    pattern = r'(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+(\w+)\s+(\d{1,2}),?\s+(\d{4})'
+    match = re.search(pattern, date_str, re.I)
+    
+    if match:
+        try:
+            month_str = match.group(1)
+            day_str = match.group(2)
+            year_str = match.group(3)
+            date_text = f"{day_str} {month_str} {year_str}"
+            
+            # Try parsing
+            for fmt in ("%d %B %Y", "%d %b %Y"):
+                try:
+                    parsed = datetime.strptime(date_text, fmt)
+                    return parsed.strftime("%Y-%m-%d")
+                except ValueError:
+                    continue
+        except Exception:
+            pass
+    
+    # Fallback: try direct parsing
+    for fmt in ("%d %B %Y", "%d %b %Y", "%d %B, %Y", "%d %b, %Y"):
+        try:
+            # Remove day name if present
+            clean_date = re.sub(r'^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+', '', date_str, flags=re.I)
+            parsed = datetime.strptime(clean_date, fmt)
+            return parsed.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    
+    return None
+
+# ==============================
 # RETRY DECORATOR
 # ==============================
 def retry_on_failure(max_attempts=None, delay=None, backoff=None):
@@ -251,34 +295,53 @@ def scrape_admission_dates(driver):
         )
         
         soup = BeautifulSoup(driver.page_source, "html.parser")
-        table = soup.find("table")
+        tables = soup.find_all("table")
         
-        if not table:
+        if not tables:
             raise DataExtractionError("Admission dates table not found")
         
         dates = {"publish_date": None, "last_date": None}
         
-        for row in table.find_all("tr"):
-            cols = [c.get_text(" ", strip=True) for c in row.find_all(["th", "td"])]
-            if len(cols) < 2:
-                continue
-            
-            label = cols[0].strip().lower()
-            value = cols[1].strip()
-            
-            # Look for Open Day (publish date)
-            if "open day" in label:
-                dates["publish_date"] = value
-                logger.debug(f"Found publish date (Open Day): {value}")
-            
-            # Look for application form submission deadline
-            elif "last date" in label and "application form" in label:
-                dates["last_date"] = value
-                logger.debug(f"Found last date: {value}")
+        # Search through all tables for admission dates
+        for table in tables:
+            for row in table.find_all("tr"):
+                cols = [c.get_text(" ", strip=True) for c in row.find_all(["th", "td"])]
+                if len(cols) < 2:
+                    continue
+                
+                label = cols[0].strip().lower()
+                value = cols[1].strip()
+                
+                if not value:
+                    continue
+                
+                # Priority 1: Look for explicit opening/start date
+                if ("registration" in label and "start" in label) or "registration opens" in label:
+                    parsed_date = parse_date_string(value)
+                    if parsed_date:
+                        dates["publish_date"] = parsed_date
+                        logger.debug(f"Found publish date (registration start): {value} -> {parsed_date}")
+                
+                # Priority 2: Look for Last Date to Apply (primary deadline)
+                elif "last date to apply" in label:
+                    parsed_date = parse_date_string(value)
+                    if parsed_date:
+                        dates["last_date"] = parsed_date
+                        logger.debug(f"Found last date: {value} -> {parsed_date}")
+                
+                # Priority 3: Look for MAT/admission test date (fallback for publish_date)
+                elif ("admission test" in label or "mat" in label) and not dates["publish_date"]:
+                    parsed_date = parse_date_string(value)
+                    if parsed_date:
+                        # Store as potential publish date fallback
+                        dates["publish_date"] = parsed_date
+                        logger.debug(f"Using test date as publish date: {value} -> {parsed_date}")
         
         # Validate extracted dates
         if not dates["last_date"]:
             logger.warning("Last date not found in table")
+        if not dates["publish_date"]:
+            logger.warning("Publish date not found in table")
         
         logger.info(f"[OK] Extracted dates - Publish: {dates['publish_date']}, Last: {dates['last_date']}")
         return dates
