@@ -18,6 +18,7 @@ from bs4 import BeautifulSoup
 # Add parent directory to path to import db module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from db.insert_admissioin import insert_admission, normalize_admission_record
+from db.date_utils import normalize_to_iso
 
 # ==============================
 # LOGGING SETUP
@@ -152,9 +153,12 @@ def scrape_admission_dates(driver):
                                 # Extract dates (remove day names in parentheses)
                                 start_date_str = re.sub(r'\([^)]*\)', '', start_date_str).strip()
                                 end_date_str = re.sub(r'\([^)]*\)', '', end_date_str).strip()
-                                
-                                dates["publish_date"] = format_date(start_date_str, year=datetime.now().year)
-                                dates["last_date"] = format_date(end_date_str, year=datetime.now().year)
+
+                                # Prefer current year for parsed dates; fall back to current year if uncertain
+                                from datetime import datetime as _dt
+                                current_year = _dt.now().year
+                                dates["publish_date"] = format_date(start_date_str, year=current_year)
+                                dates["last_date"] = format_date(end_date_str, year=current_year)
                                 break
             
             if dates["last_date"]:
@@ -171,29 +175,16 @@ def format_date(date_str, year=None):
     if not date_str:
         return None
     
-    # Add year if not present
-    if year and str(year) not in date_str:
-        date_str = f"{date_str} {year}"
-    
-    # Try different date formats
-    formats = [
-        "%B %d %Y",       # May 19 2025
-        "%b %d %Y",       # May 19 2025
-        "%B %d, %Y",      # May 19, 2025
-        "%d-%m-%Y",       # 19-05-2025
-        "%d/%m/%Y",       # 19/05/2025
-        "%Y-%m-%d"        # 2025-05-19 (already correct)
-    ]
-    
-    for fmt in formats:
-        try:
-            date_obj = datetime.strptime(date_str.strip(), fmt)
-            return date_obj.strftime("%Y-%m-%d")
-        except ValueError:
-            continue
-    
-    logger.warning(f"Could not parse date: {date_str}")
-    return None
+    # Add year if not present then delegate to shared normalizer
+    try:
+        if year and str(year) not in str(date_str):
+            candidate = f"{date_str} {year}"
+        else:
+            candidate = date_str
+        return normalize_to_iso(candidate)
+    except Exception:
+        logger.warning(f"Could not parse date: {date_str}")
+        return None
 
 # ==============================
 # BUILD OUTPUT

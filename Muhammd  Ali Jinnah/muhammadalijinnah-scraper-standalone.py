@@ -24,6 +24,7 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 # Add parent directory to path to import db module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from db.insert_admissioin import insert_admission, normalize_admission_record
+from db.date_utils import normalize_to_iso
 
 # ==============================
 # CONFIGURATION

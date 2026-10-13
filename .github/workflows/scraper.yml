@@ -34,7 +34,11 @@ jobs:
 
       - name: Run scraper pipeline
         env:
+          # Optional scraper mirror table (scraped_admissions).
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Results reach the app only through the backend ingest API.
+          BACKEND_BASE_URL: ${{ secrets.BACKEND_BASE_URL }}
+          SCRAPER_INTERNAL_SERVICE_TOKEN: ${{ secrets.SCRAPER_INTERNAL_SERVICE_TOKEN }}
           scraperapikey: ${{ secrets.SCRAPER_API_KEY }}
           Geminiapikey: ${{ secrets.GEMINI_API_KEY }}
         run: |

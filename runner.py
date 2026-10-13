@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
+
+from db.backend_ingest import backend_configured, load_root_env, push_spool
 
 # Ordered production scraper entry points.
 SCRAPER_SCRIPTS = [
@@ -50,6 +54,16 @@ def main() -> int:
         help="Delay between scraper runs in seconds (default: 3).",
     )
     parser.add_argument(
+        "--no-push",
+        action="store_true",
+        help="Do not push results to the backend ingest API.",
+    )
+    parser.add_argument(
+        "--push-only",
+        metavar="SPOOL_FILE",
+        help="Skip scraping and push an existing spool file to the backend.",
+    )
+    parser.add_argument(
         "--list",
         action="store_true",
         help="List scraper scripts and exit.",
@@ -63,6 +77,22 @@ def main() -> int:
         for i, script in enumerate(SCRAPER_SCRIPTS, start=1):
             print(f"{i}. {script}")
         return 0
+
+    load_root_env()
+
+    if args.push_only:
+        push_spool(args.push_only)
+        return 0
+
+    push = not args.no_push
+    if push and not backend_configured():
+        print("[WARN] BACKEND_BASE_URL / SCRAPER_INTERNAL_SERVICE_TOKEN not set; results will not reach the app.")
+        push = False
+
+    # Scrapers append their records here (see db/backend_ingest.py); pushed once at the end.
+    spool_fd, spool_path = tempfile.mkstemp(prefix="scraper-spool-", suffix=".jsonl")
+    os.close(spool_fd)
+    os.environ["SCRAPER_SPOOL_FILE"] = spool_path
 
     failed: list[tuple[Path, int]] = []
 
@@ -84,12 +114,30 @@ def main() -> int:
         if idx < len(SCRAPER_SCRIPTS):
             time.sleep(args.sleep_seconds)
 
+    push_error = None
+    if push:
+        try:
+            push_spool(spool_path)
+        except Exception as error:  # report, keep the spool for --push-only
+            push_error = error
+            print(f"[FAILED] Backend push failed: {error}")
+            print(f"Spool kept for retry: python runner.py --push-only {spool_path}")
+    if push_error is None:
+        try:
+            os.remove(spool_path)
+        except OSError:
+            pass
+
     print("=" * 80)
     print("RUN SUMMARY")
     print("=" * 80)
     print(f"Total scrapers: {len(SCRAPER_SCRIPTS)}")
     print(f"Succeeded: {len(SCRAPER_SCRIPTS) - len(failed)}")
     print(f"Failed: {len(failed)}")
+
+    if push_error is not None:
+        print("Backend push: FAILED")
+        return 1
 
     if failed:
         print("Failed scripts:")
