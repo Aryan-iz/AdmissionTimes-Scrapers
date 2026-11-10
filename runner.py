@@ -86,7 +86,13 @@ def main() -> int:
 
     push = not args.no_push
     if push and not backend_configured():
-        print("[WARN] BACKEND_BASE_URL / SCRAPER_INTERNAL_SERVICE_TOKEN not set; results will not reach the app.")
+        message = "BACKEND_BASE_URL / SCRAPER_INTERNAL_SERVICE_TOKEN not set; results will not reach the app."
+        # In CI that is a configuration error: stop now instead of scraping for
+        # 20 minutes and discarding the results.
+        if os.getenv("GITHUB_ACTIONS") == "true":
+            print(f"[FAILED] {message} Add both as repository secrets (Settings -> Secrets and variables -> Actions).")
+            return 2
+        print(f"[WARN] {message}")
         push = False
 
     # Scrapers append their records here (see db/backend_ingest.py); pushed once at the end.

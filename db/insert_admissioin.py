@@ -22,7 +22,8 @@ def _load_root_env():
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 key, value = line.split("=", 1)
-                os.environ[key.strip()] = value.strip()
+                # Real environment variables (e.g. CI secrets) win over the local .env.
+                os.environ.setdefault(key.strip(), value.strip())
     except Exception:
         # Keep scraper flow resilient; missing env will be handled later when accessed.
         pass
@@ -388,6 +389,11 @@ def insert_admission(record):
     except Exception as e:
         if conn:
             conn.rollback()
+        # The mirror is optional history. When the record is already queued
+        # for the backend, a mirror outage must not fail the scraper.
+        if queued:
+            print("[WARN] Scraper mirror (DATABASE_URL) write failed; record still queued for the backend:", e)
+            return
         print("[ERROR] DB upsert failed:", e)
         raise  # Re-raise to let caller handle the error
 
