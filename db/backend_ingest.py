@@ -66,7 +66,10 @@ def _iso_day(value):
 def to_ingest_record(record):
     """Map a normalized scraper record to the backend ingest DTO, or None if it cannot be ingested."""
     university = (record.get("university") or "").strip()
-    title = (record.get("program_title") or "").strip()
+    programs = list(record.get("programs_offered") or [])
+    # The backend publishes one admission per program, so an announcement whose
+    # heading was not captured is still usable when it lists its programs.
+    title = (record.get("program_title") or "").strip() or ("Undergraduate Admissions" if programs else "")
     last_date = _iso_day(record.get("last_date"))
     if not university or not title or not last_date:
         return None
@@ -77,7 +80,7 @@ def to_ingest_record(record):
         "source_last_date": last_date,
         "source_details_link": (record.get("details_link") or "").strip(),
         "source_publish_date": _iso_day(record.get("publish_date")),
-        "programs_offered": list(record.get("programs_offered") or []),
+        "programs_offered": programs,
     }
 
 
