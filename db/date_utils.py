@@ -1,51 +1,44 @@
+import re
 from datetime import datetime, date
+
 from dateutil import parser as date_parser
 
+_YEAR = re.compile(r"\b(19|20)\d{2}\b")
 
-def normalize_to_iso(value):
-    """Normalize a date-like value (str/date/datetime) to ISO YYYY-MM-DD.
 
-    Heuristics:
-    - If the parsed year is older than current year and the date is in the past,
-      prefer replacing the year with the current year when the resulting date
-      is in the future or near-future.
-    - Returns None on failure.
+def normalize_to_iso(value, today=None):
+    """Normalize a date-like value (str/date/datetime) to ISO YYYY-MM-DD, or None.
+
+    A year written in the source is never changed: a deadline that has passed
+    must stay in the past (rewriting "December 20, 2025" to 2026 published
+    closed admissions as open for another year).
+
+    Only when the text has no year ("20 December") is one inferred: the
+    current year, or next year when that date is more than 30 days behind us
+    (an announcement for an upcoming intake).
     """
     if value is None:
         return None
 
-    # If already a date/datetime
-    if isinstance(value, date) and not isinstance(value, datetime):
-        return value.strftime("%Y-%m-%d")
     if isinstance(value, datetime):
         return value.date().strftime("%Y-%m-%d")
+    if isinstance(value, date):
+        return value.strftime("%Y-%m-%d")
 
     text = str(value).strip()
     if not text:
         return None
 
-    now = datetime.now()
-    current_year = now.year
-
-    # Try to parse as-is
+    today = today or datetime.now().date()
     try:
-        dt = date_parser.parse(text, fuzzy=True, default=now)
-        parsed = dt.date()
-    except Exception:
-        parsed = None
-
-    if not parsed:
+        parsed = date_parser.parse(text, fuzzy=True, default=datetime(today.year, 1, 1)).date()
+    except (ValueError, OverflowError):
         return None
 
-    # If parsed year is much older (e.g., previous year) and results in a past date,
-    # try replacing the year with current year and see if it makes sense.
-    if parsed.year < current_year:
+    if not _YEAR.search(text) and (today - parsed).days > 30:
         try:
-            alt = parsed.replace(year=current_year)
-            # If alt is same or in the future (within reasonable window), prefer it.
-            if alt >= now.date() or (now.date() - alt).days < 30:
-                parsed = alt
-        except Exception:
-            pass
+            parsed = parsed.replace(year=parsed.year + 1)
+        except ValueError:  # 29 February
+            parsed = parsed.replace(year=parsed.year + 1, day=28)
 
     return parsed.strftime("%Y-%m-%d")

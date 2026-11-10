@@ -18,6 +18,15 @@ Production scraper suite for collecting undergraduate admissions information fro
 - Runs all scrapers sequentially via a master runner.
 - Supports automated daily execution via GitHub Actions.
 
+## How Scraped Data Reaches the App
+
+- Scrapers never write the app's `admissions` table. `runner.py` collects every record in a spool file and pushes it once to the backend (`POST /api/v1/internal/scraper/ingest-batch`, see `db/backend_ingest.py`).
+- Each record is one announcement: university, title, deadline, link and `programs_offered`.
+- The backend publishes **one admission per program**. Program names are normalized ("Bachelor of Science (Computer Science)" -> "BS Computer Science"), and each program gets the announcement's deadline and link. An announcement without a program list is skipped and shown in the admin scraper monitor, so keep `programs_offered` filled.
+- New programs wait for admin verification. Later runs update the deadline and link of the same program; a program whose deadline has already passed is not published.
+- Dates written with a year are never changed (`db/date_utils.py`); a year is only inferred when the source omits it.
+- The `scraped_admissions` table (`DATABASE_URL`) is an optional history mirror; the app does not read it.
+
 ## Universities Covered
 
 1. FAST University

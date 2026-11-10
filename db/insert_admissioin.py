@@ -172,22 +172,6 @@ def insert_admission(record):
         )
         existing = cursor.fetchone()
 
-        # Backward-compatible fallback for legacy schema where university is unique.
-        if not existing:
-            cursor.execute(
-                """
-                SELECT id, program_title, last_date
-                FROM scraped_admissions
-                WHERE university = %s
-                ORDER BY id DESC
-                LIMIT 1
-                """,
-                (record["university"],),
-            )
-            existing_uni = cursor.fetchone()
-            if existing_uni:
-                existing = (existing_uni[0], existing_uni[2])
-
         if existing:
             existing_id, existing_program_title, existing_last_date, existing_details_link, existing_programs = existing
             existing_last_date = _to_readable_date(existing_last_date)
@@ -282,58 +266,7 @@ def insert_admission(record):
                 conn.rollback()
                 print("[WARN] Dedupe failed after update:", e)
 
-            # If this record is an aggregated record (multiple programs) and the deadline changed,
-            # propagate the deadline to other rows for the same university that have a different last_date.
-            try:
-                is_aggregated = len(record.get("programs_offered", [])) > 1
-            except Exception:
-                is_aggregated = False
-
-            if is_aggregated and (existing_last_date or "") != (new_last_date or ""):
-                try:
-                    cursor.execute(
-                        """
-                        UPDATE scraped_admissions
-                        SET last_date = %s, updated_at = CURRENT_TIMESTAMP
-                        WHERE university = %s AND id != %s AND (last_date IS DISTINCT FROM %s OR last_date IS NULL)
-                        """,
-                        (
-                            record.get("last_date"),
-                            record.get("university"),
-                            existing_id,
-                            record.get("last_date"),
-                        ),
-                    )
-                    conn.commit()
-                    print(f"[INFO] Propagated last_date to other programs for university: {record['university']}")
-                except Exception as e:
-                    conn.rollback()
-                    print("[WARN] Failed to propagate last_date to sibling records:", e)
-
             return
-
-        # Before inserting, check if another row for this university already has a newer deadline.
-        incoming_date_obj = _parse_date_to_dateobj(record.get("last_date"))
-        try:
-            cursor.execute(
-                """
-                SELECT MAX(last_date) FROM scraped_admissions WHERE university = %s
-                """,
-                (record.get("university"),),
-            )
-            max_row = cursor.fetchone()
-            max_last_date = None
-            if max_row:
-                max_last_date = max_row[0]
-            max_date_obj = _parse_date_to_dateobj(max_last_date)
-            today = datetime.now().date()
-            if incoming_date_obj and max_date_obj and incoming_date_obj < max_date_obj and max_date_obj >= today:
-                print(f"[INFO] Incoming insert skipped because a newer deadline exists for university {record.get('university')}")
-                conn.rollback()
-                return
-        except Exception:
-            # If the check fails, continue with insert (fail-safe)
-            pass
 
         cursor.execute(
             """
